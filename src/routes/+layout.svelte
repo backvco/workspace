@@ -60,7 +60,7 @@
     api.authStatus()
       .then((a) => { auth = a; if (!(a.authEnabled && !a.authed)) initProjects(); })
       .catch(() => { auth = { authEnabled: false, authed: true, needsBootstrap: false, user: null }; initProjects(); });
-    const tick = async () => { if (document.hidden) return; try { stats = await api.stats(); } catch {} };
+    const tick = async () => { if (document.hidden) return; try { stats = await api.stats(); } catch (err) { console.warn('Failed to fetch stats', err); } };
     tick();
     const id = setInterval(tick, 5000);
 
