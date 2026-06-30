@@ -66,10 +66,16 @@
         {#if v.incoming?.length}
           <div class="max-h-40 overflow-auto rounded border border-line divide-y divide-line mb-2">
             {#each v.incoming as c (c.hash)}
-              <div class="px-2 py-1 flex gap-2">
+              <svelte:element
+                this={c.url ? 'a' : 'div'}
+                href={c.url || undefined}
+                target={c.url ? '_blank' : undefined}
+                rel={c.url ? 'noopener noreferrer' : undefined}
+                class="px-2 py-1 flex gap-2 {c.url ? 'hover:bg-bg/50' : ''}"
+              >
                 <span class="font-mono text-xs text-muted shrink-0">{c.hash}</span>
                 <span class="text-xs text-content truncate">{c.subject}</span>
-              </div>
+              </svelte:element>
             {/each}
           </div>
           <p class="text-xs text-muted mb-2">{v.behind} commit{v.behind === 1 ? '' : 's'} on origin/{v.branch}.</p>

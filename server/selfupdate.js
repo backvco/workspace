@@ -31,6 +31,13 @@ function deployedRev() {
   catch { return ''; }
 }
 
+// Turn a git remote URL (ssh or https) into a browsable GitHub repo URL, or
+// '' if it's not a GitHub remote we can link to.
+function githubRepoUrl(remoteUrl) {
+  const m = (remoteUrl || '').trim().match(/github\.com[:/]([^/]+)\/(.+?)(\.git)?$/);
+  return m ? `https://github.com/${m[1]}/${m[2]}` : '';
+}
+
 let updating = false;
 
 /**
@@ -43,6 +50,7 @@ export async function updateStatus() {
   await git(['fetch', '--quiet', '--prune', 'origin']);
   const head = (await git(['rev-parse', 'HEAD'])).out.trim();
   const remote = (await git(['rev-parse', '--verify', '--quiet', `origin/${branch}`])).out.trim();
+  const repoUrl = githubRepoUrl((await git(['remote', 'get-url', 'origin'])).out);
 
   let ahead = 0, behind = 0, incoming = [];
   if (remote) {
@@ -52,7 +60,8 @@ export async function updateStatus() {
       const log = await git(['log', '--no-merges', '--pretty=%h\t%s', `HEAD..origin/${branch}`, '-n', '20']);
       if (log.ok) incoming = log.out.split('\n').filter(Boolean).map((l) => {
         const i = l.indexOf('\t');
-        return { hash: l.slice(0, i), subject: l.slice(i + 1) };
+        const hash = l.slice(0, i);
+        return { hash, subject: l.slice(i + 1), url: repoUrl ? `${repoUrl}/commit/${hash}` : '' };
       });
     }
   }
@@ -63,6 +72,8 @@ export async function updateStatus() {
     head: short(head),
     remote: short(remote),
     deployed: short(deployed),
+    repoUrl,
+    deployedUrl: repoUrl && deployed ? `${repoUrl}/commit/${deployed}` : '',
     ahead, behind, incoming, dirty, updating,
     updateAvailable: behind > 0,
     buildStale: !!deployed && deployed !== head,

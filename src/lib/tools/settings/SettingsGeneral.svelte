@@ -22,7 +22,8 @@
       <dt class="text-muted">Branch</dt><dd>{v.branch}</dd>
       <dt class="text-muted">Deployed</dt>
       <dd>
-        {v.deployed || '—'}
+        {#if v.deployedUrl}<a href={v.deployedUrl} target="_blank" rel="noopener noreferrer" class="hover:underline">{v.deployed}</a>
+        {:else}{v.deployed || '—'}{/if}
         {#if v.buildStale}<span class="text-amber-600 dark:text-amber-400"> (HEAD {v.head} not deployed yet)</span>{/if}
       </dd>
       <dt class="text-muted">origin/{v.branch}</dt><dd>{v.remote || '—'}</dd>
@@ -34,6 +35,23 @@
         {#if v.dirty}<span class="text-muted"> · working tree dirty</span>{/if}
       </dd>
     </dl>
+
+    {#if v.incoming?.length}
+      <div class="max-h-40 overflow-auto rounded border border-line divide-y divide-line mb-3">
+        {#each v.incoming as c (c.hash)}
+          <svelte:element
+            this={c.url ? 'a' : 'div'}
+            href={c.url || undefined}
+            target={c.url ? '_blank' : undefined}
+            rel={c.url ? 'noopener noreferrer' : undefined}
+            class="px-2 py-1 flex gap-2 font-mono {c.url ? 'hover:bg-bg/50' : ''}"
+          >
+            <span class="text-xs text-muted shrink-0">{c.hash}</span>
+            <span class="text-xs text-content truncate">{c.subject}</span>
+          </svelte:element>
+        {/each}
+      </div>
+    {/if}
 
     {#if message}
       <p class="text-xs {phase === 'error' ? 'text-red-600 dark:text-red-400' : 'text-muted'} mb-2 break-words">{message}</p>

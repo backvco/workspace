@@ -8,7 +8,7 @@ export const s = $state({
   status: null,
   /** @type {{projectRoots:string[], termCwd:string, dataDir:string, agentBin:string, hasSessionKey:boolean}|null} */
   config: null,
-  /** @type {{branch:string, head:string, remote:string, deployed:string, ahead:number, behind:number, incoming:{hash:string,subject:string}[], dirty:boolean, updateAvailable:boolean, buildStale:boolean, canFastForward:boolean}|null} */
+  /** @type {{branch:string, head:string, remote:string, deployed:string, repoUrl:string, deployedUrl:string, ahead:number, behind:number, incoming:{hash:string,subject:string,url:string}[], dirty:boolean, updateAvailable:boolean, buildStale:boolean, canFastForward:boolean}|null} */
   version: null,
   /** @type {{id:string,username:string,name:string,email:string,avatar:string,createdAt:number,passkeyCount:number}[]} */
   users: [],
