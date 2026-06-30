@@ -20,7 +20,7 @@ export function flash(/** @type {string} */ m, isErr = false) {
 }
 
 export async function reload() {
-  try { s.status = await api.authStatus(); } catch {}
-  try { s.config = await api.serverConfig(); } catch {}
-  try { s.users = (await api.authUsers()).users; } catch {}
+  try { s.status = await api.authStatus(); } catch (e) { console.error('Failed to load auth status:', e); }
+  try { s.config = await api.serverConfig(); } catch (e) { console.error('Failed to load server config:', e); }
+  try { s.users = (await api.authUsers()).users; } catch (e) { console.error('Failed to load auth users:', e); }
 }
