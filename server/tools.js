@@ -87,6 +87,7 @@ export async function scaffoldTool(cfg, { name, description }) {
     `Write the file to ${file} using your Write tool. The file must be valid Node ESM and dependency-free.`
   ].join('\n').replace(/'/g, `'\\''`);
   const r = await sh('bash', ['-lc', `cd '${dir}' && ${cfg.claudeBin || 'claude'} -p --model opus --settings '${permFile}' '${prompt}'`], { timeout: 240000 });
+  if (!r.ok) return { error: 'failed to execute Claude command', detail: (r.err || r.out || '').slice(0, 300) };
   if (!existsSync(file)) return { error: 'Claude did not produce the file', detail: (r.out || r.err || '').slice(0, 300) };
   return { ok: true, id: name, file };
 }
