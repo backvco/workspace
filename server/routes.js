@@ -12,6 +12,7 @@ import {
   listProjects, buildDbServer, existingPassword, moveServer
 } from './mcp.js';
 import { list as fsList, read as fsRead, write as fsWrite, ensureWithin } from './fs.js';
+import { listClipboard, clipboardFilePath, pruneClipboard } from './clipboard.js';
 import { getStats } from './stats.js';
 import {
   listTargets, createTask, startTask, listAgents, stopAgent, removeTask, recordEvent,
@@ -313,6 +314,22 @@ export function buildRouter(cfg) {
       res.json({ path: file, injected });
     });
 
+  // --- clipboard explorer: list / serve / prune pasted images for a workspace ---
+  r.get('/clipboard', (req, res) => res.json(listClipboard(cfg, wsId(req))));
+
+  r.get('/clipboard/file', (req, res) => {
+    // wsId from the ?ws= query (an <img src> can't send the project header), else header.
+    const id = req.query.ws ? cfg.normalizeWorkspaceId?.(String(req.query.ws)) || String(req.query.ws) : wsId(req);
+    const file = clipboardFilePath(cfg, id, String(req.query.name || ''));
+    if (!file) return res.status(400).json({ error: 'invalid name' });
+    res.sendFile(file, (err) => { if (err && !res.headersSent) res.status(404).json({ error: 'not found' }); });
+  });
+
+  r.delete('/clipboard', authj, (req, res) => {
+    const { all, olderThanMs } = req.body || {};
+    res.json(pruneClipboard(cfg, wsId(req), { all: !!all, olderThanMs: olderThanMs ?? null }));
+  });
+
   // --- MCP management: global (user scope) + per-project (.mcp.json) ---
   r.get('/mcp/global', (_req, res) => res.json({ servers: readGlobal() }));
   r.get('/mcp/projects', (_req, res) => res.json({ projects: listProjects(cfg) }));
@@ -505,7 +522,7 @@ export function buildRouter(cfg) {
   r.post('/planners/:id/verify', aj, async (req, res) => res.json(await verifyPlanner(cfg, req.params.id, req.body?.tickets)));
   r.post('/planners/:id/plan', aj, async (req, res) => res.json(await setPlanName(cfg, req.params.id, req.body?.name)));
   r.post('/planners/:id/refine', aj, async (req, res) => res.json(await refineFromReview(cfg, req.params.id, req.body?.findings)));
-  r.post('/planners/:id/create', aj, async (req, res) => res.json(await createFromPlanner(cfg, req.params.id, req.body?.tickets, req.body?.override)));
+  r.post('/planners/:id/create', aj, async (req, res) => res.json(await createFromPlanner(cfg, req.params.id, req.body?.tickets)));
   r.post('/planners/:id/build', aj, async (req, res) => {
     const p = await getPlanner(cfg, req.params.id);
     if (!p) return res.json({ error: 'not found' });

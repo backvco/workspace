@@ -31,6 +31,12 @@ const TOOLS = [
       // do the work; return any JSON-serializable value
       return { echoed: args.message };
     }
+  },
+  {
+    name: 'workspace_stats',
+    description: 'Example of calling the workspace API with the rest() helper — returns live host CPU/memory. Delete if your tool talks to nothing.',
+    inputSchema: { type: 'object', properties: {} },
+    run: async () => rest('/stats')
   }
 ];
 // ────────────────────────────────────────────────────────────────────────────
