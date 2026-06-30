@@ -94,7 +94,7 @@
   <LoginGate needsBootstrap={auth?.needsBootstrap} loginPolicy={auth?.loginPolicy} />
 {:else}
 <div class="flex h-full" style="padding-top: env(safe-area-inset-top)">
-  {#if railOpen}<ProjectRail />{/if}
+  {#if railOpen}<ProjectRail user={auth?.authed ? auth.user : null} onLogout={logout} />{/if}
   <div class="flex flex-col flex-1 min-w-0">
   <header class="flex items-center h-9 px-3 bg-card border-b border-line text-sm">
     <button class="text-muted hover:text-content mr-2 text-base leading-none" title={railOpen ? 'Hide projects' : 'Show projects'} onclick={toggleRail}>☰</button>
@@ -141,14 +141,6 @@
         title="Tips & help"
         aria-label="Tips & help"
         onclick={(e) => { e.stopPropagation(); helpOpen = true; }}>?</button>
-
-      <!-- signed-in user + logout (only when auth is on) -->
-      {#if auth?.authed && auth.user}
-        <div class="flex items-center gap-1.5 text-xs text-muted">
-          <span class="hidden sm:inline" title="Signed in">{auth.user.username}</span>
-          <button class="hover:text-content underline" title="Sign out" onclick={logout}>Sign out</button>
-        </div>
-      {/if}
 
       <!-- settings -->
       <button class="text-muted hover:text-content leading-none" title="Settings" aria-label="Settings"

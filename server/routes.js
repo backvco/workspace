@@ -11,7 +11,7 @@ import {
   readProject, writeProjectServer, removeProjectServer,
   listProjects, buildDbServer, existingPassword, moveServer
 } from './mcp.js';
-import { list as fsList, read as fsRead, write as fsWrite, withinRoots } from './fs.js';
+import { list as fsList, read as fsRead, write as fsWrite, ensureWithin } from './fs.js';
 import { getStats } from './stats.js';
 import {
   listTargets, createTask, startTask, listAgents, stopAgent, removeTask, recordEvent,
@@ -315,16 +315,25 @@ export function buildRouter(cfg) {
   r.get('/mcp/global', (_req, res) => res.json({ servers: readGlobal() }));
   r.get('/mcp/projects', (_req, res) => res.json({ projects: listProjects(cfg) }));
   r.get('/mcp/project', (req, res) => {
-    const p = String(req.query.path || '');
-    if (!p) return res.status(400).json({ error: 'path required' });
+    // Confine to a project root so .mcp.json reads can't traverse out (and so the
+    // sanitized path is what reaches the fs sink — clears CodeQL path-injection).
+    let p;
+    try { p = ensureWithin(cfg, String(req.query.path || '')); } catch { return res.status(400).json({ error: 'path outside allowed roots' }); }
     res.json({ path: p, servers: readProject(p) });
   });
   r.post('/mcp/add', express.json({ limit: '256kb' }), async (req, res) => {
     const { scope, projectPath, name, kind, config } = req.body || {};
     if (!name || !kind) return res.status(400).json({ error: 'name and kind required' });
+    // For project scope, confine the target dir to a configured root up front and
+    // use that sanitized path everywhere below.
+    let safePath = projectPath;
+    if (scope !== 'global') {
+      if (!projectPath) return res.status(400).json({ error: 'projectPath required for project scope' });
+      try { safePath = ensureWithin(cfg, projectPath); } catch { return res.status(400).json({ error: 'projectPath outside allowed roots' }); }
+    }
     // Editing in place: blank password means "keep the current one".
     if (config && !config.password) {
-      const keep = existingPassword(cfg, scope, projectPath, name);
+      const keep = existingPassword(cfg, scope, safePath, name);
       if (keep) config.password = keep;
     }
     const server = buildDbServer(kind, config || {});
@@ -333,14 +342,17 @@ export function buildRouter(cfg) {
       const out = await addGlobal(cfg, name, server);
       return out.ok ? res.json({ ok: true }) : res.status(500).json({ error: out.err || 'claude mcp add failed' });
     }
-    if (!projectPath) return res.status(400).json({ error: 'projectPath required for project scope' });
-    try { writeProjectServer(projectPath, name, server); res.json({ ok: true, file: `${projectPath}/.mcp.json` }); }
+    try { writeProjectServer(safePath, name, server); res.json({ ok: true, file: `${safePath}/.mcp.json` }); }
     catch (e) { (console.error('server error:', e?.message || e), res.status(500).json({ error: 'internal error' })); }
   });
   r.post('/mcp/move', express.json({ limit: '64kb' }), async (req, res) => {
     const { name, from, to } = req.body || {};
     if (!name || !from || !to) return res.status(400).json({ error: 'name, from, to required' });
-    const out = await moveServer(cfg, name, from, to);
+    // Confine each project-scoped endpoint to a root before it reaches the fs sinks.
+    const confineLoc = (loc) => loc?.scope === 'global' ? loc : { ...loc, projectPath: ensureWithin(cfg, loc?.projectPath) };
+    let safeFrom, safeTo;
+    try { safeFrom = confineLoc(from); safeTo = confineLoc(to); } catch { return res.status(400).json({ error: 'projectPath outside allowed roots' }); }
+    const out = await moveServer(cfg, name, safeFrom, safeTo);
     return out.ok ? res.json({ ok: true }) : res.status(500).json({ error: out.error });
   });
   r.post('/mcp/remove', express.json({ limit: '64kb' }), async (req, res) => {
@@ -350,7 +362,9 @@ export function buildRouter(cfg) {
       const out = await removeGlobal(cfg, name);
       return out.ok ? res.json({ ok: true }) : res.status(500).json({ error: out.err || 'remove failed' });
     }
-    try { removeProjectServer(projectPath, name); res.json({ ok: true }); }
+    let safePath;
+    try { safePath = ensureWithin(cfg, projectPath); } catch { return res.status(400).json({ error: 'projectPath outside allowed roots' }); }
+    try { removeProjectServer(safePath, name); res.json({ ok: true }); }
     catch (e) { (console.error('server error:', e?.message || e), res.status(500).json({ error: 'internal error' })); }
   });
 
@@ -372,18 +386,23 @@ export function buildRouter(cfg) {
   });
 
   // --- Changes: git repos, working-tree status, and HEAD-vs-disk diff ---
-  // Confine every git operation to a configured project root: when a request names
-  // a repo (query or body), it must resolve inside the roots — so git/gh can't be
-  // pointed at an arbitrary directory via path traversal.
-  r.use('/git', express.json({ limit: '256kb' }), (req, res, next) => {
-    const repo = String(req.query.repo || req.body?.repo || '');
-    if (repo && !withinRoots(cfg, repo)) return res.status(400).json({ error: 'repo outside allowed roots' });
-    next();
-  });
+  const gj = express.json({ limit: '256kb' });
+  // Resolve the request's repo and confine it to a configured project root, so
+  // git/gh can never run in a directory outside the roots (path traversal). Returns
+  // the sanitized absolute path, or null after sending a 400 (caller must return).
+  // Deriving it here — rather than in middleware — also threads the sanitized value
+  // into git.js, which clears CodeQL's path-injection on the execFile sinks.
+  const safeRepo = (req, res) => {
+    try { return ensureWithin(cfg, String(req.query.repo ?? req.body?.repo ?? '')); }
+    catch { res.status(400).json({ error: 'repo outside allowed roots' }); return null; }
+  };
   r.get('/git/repos', (_req, res) => res.json({ repos: listRepos(cfg) }));
-  r.get('/git/status', async (req, res) => res.json({ changes: await gitStatus(String(req.query.repo || '')) }));
+  r.get('/git/status', async (req, res) => {
+    const repo = safeRepo(req, res); if (repo === null) return;
+    res.json({ changes: await gitStatus(repo) });
+  });
   r.get('/git/diff', async (req, res) => {
-    const repo = String(req.query.repo || '');
+    const repo = safeRepo(req, res); if (repo === null) return;
     const file = String(req.query.file || '');
     let modified = '';
     try { modified = fsRead(cfg, `${repo}/${file}`); } catch { modified = ''; } // deleted/binary -> empty
@@ -393,12 +412,12 @@ export function buildRouter(cfg) {
   // Read-only branch browsing: compare the current branch against another ref
   // (no checkout), and diff a single file across the two refs.
   r.get('/git/compare', async (req, res) => {
-    const repo = String(req.query.repo || '');
+    const repo = safeRepo(req, res); if (repo === null) return;
     const base = await currentBranch(repo);
     res.json({ base, files: await diffRefs(repo, base, String(req.query.ref || '')) });
   });
   r.get('/git/refdiff', async (req, res) => {
-    const repo = String(req.query.repo || '');
+    const repo = safeRepo(req, res); if (repo === null) return;
     const file = String(req.query.file || '');
     res.json({
       original: await showAtRef(repo, String(req.query.base || ''), file),
@@ -407,21 +426,39 @@ export function buildRouter(cfg) {
   });
 
   // git mutations (POST). Each returns { ok } or { error, detail } so the UI can show why.
-  const gj = express.json({ limit: '256kb' });
   const done = (res, out) => (out.ok ? res.json({ ok: true, out: out.out }) : res.status(400).json({ error: out.err || 'git error' }));
-  r.get('/git/branches', async (req, res) => res.json(await gitBranches(String(req.query.repo || ''))));
-  r.post('/git/checkout', gj, async (req, res) => done(res, await checkout(req.body.repo, req.body.branch)));
-  r.post('/git/branch', gj, async (req, res) => done(res, await createBranch(req.body.repo, req.body.name, req.body.from)));
-  r.post('/git/stage', gj, async (req, res) =>
-    done(res, req.body.all ? await stageAll(req.body.repo) : await stage(req.body.repo, req.body.files || [])));
-  r.post('/git/unstage', gj, async (req, res) => done(res, await unstage(req.body.repo, req.body.files || [])));
-  r.post('/git/commit', gj, async (req, res) => {
-    if (!req.body.message) return res.status(400).json({ error: 'commit message required' });
-    done(res, await commit(req.body.repo, req.body.message));
+  r.get('/git/branches', async (req, res) => {
+    const repo = safeRepo(req, res); if (repo === null) return;
+    res.json(await gitBranches(repo));
   });
-  r.post('/git/push', gj, async (req, res) => done(res, await push(req.body.repo, req.body.branch, req.body.setUpstream)));
+  r.post('/git/checkout', gj, async (req, res) => {
+    const repo = safeRepo(req, res); if (repo === null) return;
+    done(res, await checkout(repo, req.body.branch));
+  });
+  r.post('/git/branch', gj, async (req, res) => {
+    const repo = safeRepo(req, res); if (repo === null) return;
+    done(res, await createBranch(repo, req.body.name, req.body.from));
+  });
+  r.post('/git/stage', gj, async (req, res) => {
+    const repo = safeRepo(req, res); if (repo === null) return;
+    done(res, req.body.all ? await stageAll(repo) : await stage(repo, req.body.files || []));
+  });
+  r.post('/git/unstage', gj, async (req, res) => {
+    const repo = safeRepo(req, res); if (repo === null) return;
+    done(res, await unstage(repo, req.body.files || []));
+  });
+  r.post('/git/commit', gj, async (req, res) => {
+    const repo = safeRepo(req, res); if (repo === null) return;
+    if (!req.body.message) return res.status(400).json({ error: 'commit message required' });
+    done(res, await commit(repo, req.body.message));
+  });
+  r.post('/git/push', gj, async (req, res) => {
+    const repo = safeRepo(req, res); if (repo === null) return;
+    done(res, await push(repo, req.body.branch, req.body.setUpstream));
+  });
   r.post('/git/pr', gj, async (req, res) => {
-    const r2 = await createPR(req.body.repo, req.body.base || 'dev', req.body.title || '', req.body.body || '');
+    const repo = safeRepo(req, res); if (repo === null) return;
+    const r2 = await createPR(repo, req.body.base || 'dev', req.body.title || '', req.body.body || '');
     return r2.ok ? res.json({ ok: true, url: r2.url }) : res.status(400).json({ error: r2.err || 'gh pr create failed' });
   });
 

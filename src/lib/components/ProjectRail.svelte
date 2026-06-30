@@ -7,6 +7,9 @@
   import { tabStore } from '$lib/tabs/store.svelte.js';
   import FilterSelect from '$lib/components/FilterSelect.svelte';
 
+  /** @type {{ user?: {username:string}|null, onLogout?: () => void }} */
+  let { user = null, onLogout = () => {} } = $props();
+
   let adding = $state(false);
   let label = $state(''); let dir = $state(''); let root = $state('');
   let labelEdited = $state(false);
@@ -145,4 +148,13 @@
       <button class="text-xs text-muted hover:text-content" onclick={() => (adding = true)}>+ Add project</button>
     {/if}
   </div>
+
+  <!-- signed-in user + logout (only when auth is on) -->
+  {#if user}
+    <div class="border-t border-line px-3 py-2 flex items-center gap-2 text-xs text-muted">
+      <span class="w-5 h-5 shrink-0 grid place-items-center rounded-full bg-elevated text-content text-[10px] uppercase font-semibold">{user.username?.[0] || '?'}</span>
+      <span class="flex-1 truncate" title="Signed in as {user.username}">{user.username}</span>
+      <button class="hover:text-content underline shrink-0" title="Sign out" onclick={onLogout}>Sign out</button>
+    </div>
+  {/if}
 </div>
