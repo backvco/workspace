@@ -6,6 +6,7 @@ import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { writeProjectServer, removeProjectServer, readProject } from './mcp.js';
 import { loadProjects } from './projects.js';
+import { ensureWithin } from './fs.js';
 
 const sh = (cmd, args, opts = {}) =>
   new Promise((res) => execFile(cmd, args, { maxBuffer: 1 << 22, ...opts }, (e, o, er) =>
@@ -48,13 +49,17 @@ export async function installTool(cfg, { tool, project }) {
   if (!t) return { error: 'unknown tool' };
   const p = (await loadProjects(cfg)).find((x) => x.id === project);
   if (!p) return { error: 'unknown project' };
-  writeProjectServer(p.dir, t.name, serverFor(cfg, t));
-  return { ok: true, file: `${p.dir}/.mcp.json` };
+  let dir;
+  try { dir = ensureWithin(cfg, p.dir); } catch { return { error: 'project path outside allowed roots' }; }
+  writeProjectServer(dir, t.name, serverFor(cfg, t));
+  return { ok: true, file: `${dir}/.mcp.json` };
 }
 export async function uninstallTool(cfg, { tool, project }) {
   const p = (await loadProjects(cfg)).find((x) => x.id === project);
   if (!p) return { error: 'unknown project' };
-  removeProjectServer(p.dir, tool);
+  let dir;
+  try { dir = ensureWithin(cfg, p.dir); } catch { return { error: 'project path outside allowed roots' }; }
+  removeProjectServer(dir, tool);
   return { ok: true };
 }
 
