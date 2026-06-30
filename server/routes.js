@@ -73,7 +73,7 @@ export function buildRouter(cfg) {
   // Current auth state for the UI's login gate. Always reachable.
   r.get('/auth/status', async (req, res) => {
     let enabled = false;
-    try { enabled = await getAuthEnabled(cfg); } catch {}
+    try { enabled = await getAuthEnabled(cfg); } catch (err) { console.warn('Failed to read auth enabled state:', err); }
     const user = enabled ? sessionUser(cfg, req) : null;
     let email = '';
     if (user) { try { email = (await getUser(cfg, user.uid))?.email || ''; } catch {} }
