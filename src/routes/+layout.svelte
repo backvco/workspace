@@ -32,7 +32,7 @@
   async function logout() { try { await api.authLogout(); } catch {} location.reload(); }
 
   let railOpen = $state(true);
-  function toggleRail() { railOpen = !railOpen; try { localStorage.setItem('railOpen', railOpen ? '1' : '0'); } catch {} }
+  function toggleRail() { railOpen = !railOpen; try { localStorage.setItem('railOpen', railOpen ? '1' : '0'); } catch (err) { console.warn('Failed to persist railOpen preference to localStorage', err); } }
 
   let isPwa = $state(false);
   // Intercept Cmd+W in PWA mode: close the active tab instead of the app window.
