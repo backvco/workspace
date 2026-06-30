@@ -3,6 +3,7 @@
   // (display name, email, set password, and that user's passkeys / devices).
   import { api } from '$lib/api.js';
   import Modal from '$lib/components/Modal.svelte';
+  import PasswordInput from '$lib/components/PasswordInput.svelte';
   import { enrollPasskey, passkeysSupported, deviceLabel } from '$lib/passkeys.js';
   import { s, flash, reload } from './store.svelte.js';
 
@@ -12,13 +13,15 @@
   let isSelf = $derived(!!selected && selected.id === s.status?.user?.id);
 
   // Detail form fields (seeded when the selection changes).
-  let nameInput = $state(''); let emailInput = $state(''); let newPass = $state('');
+  let nameInput = $state(''); let emailInput = $state(''); let newPass = $state(''); let newPass2 = $state('');
+  let setPwOk = $derived(newPass.length >= 6 && newPass === newPass2);
   /** @type {{id:string,name:string,addedAt:number}[]} */
   let creds = $state([]);
   let lastSeeded = '';
 
   // New-user form.
-  let newUser = $state(''); let newUserPass = $state('');
+  let newUser = $state(''); let newUserPass = $state(''); let newUserPass2 = $state('');
+  let addOk = $derived(!!newUser.trim() && newUserPass.length >= 6 && newUserPass === newUserPass2);
 
   // Auto-select the signed-in user (or the first) once users load.
   $effect(() => {
@@ -28,7 +31,7 @@
   $effect(() => {
     if (selected && selected.id !== lastSeeded) {
       lastSeeded = selected.id;
-      nameInput = selected.name || ''; emailInput = selected.email || ''; newPass = '';
+      nameInput = selected.name || ''; emailInput = selected.email || ''; newPass = ''; newPass2 = '';
     }
   });
 
@@ -47,20 +50,20 @@
     flash('Profile saved.'); reload();
   }
   async function setPassword() {
-    if (!selected || newPass.length < 6) return;
+    if (!selected || !setPwOk) return;
     s.busy = true;
     const r = await api.authSetPassword(selected.id, newPass);
     s.busy = false;
     if (r.error) return flash(r.error, true);
-    newPass = ''; flash(`Password updated for ${selected.username}.`);
+    newPass = ''; newPass2 = ''; flash(`Password updated for ${selected.username}.`);
   }
   async function addUser() {
-    if (!newUser.trim() || newUserPass.length < 6) return;
+    if (!addOk) return;
     s.busy = true;
     const r = await api.authAddUser(newUser.trim(), newUserPass);
     s.busy = false;
     if (r.error) return flash(r.error, true);
-    const id = r.id; newUser = ''; newUserPass = ''; showAdd = false;
+    const id = r.id; newUser = ''; newUserPass = ''; newUserPass2 = ''; showAdd = false;
     flash('User added.'); await reload(); if (id) selectUser(id);
   }
   async function removeUser() {
@@ -111,7 +114,7 @@
   <!-- master list -->
   <div class="rounded-lg border border-line bg-card p-2 overflow-auto">
     <button class="w-full mb-2 text-xs bg-green-700 hover:bg-green-600 text-white rounded px-3 py-1.5"
-      onclick={() => { newUser = ''; newUserPass = ''; showAdd = true; }}>+ New user</button>
+      onclick={() => { newUser = ''; newUserPass = ''; newUserPass2 = ''; showAdd = true; }}>+ New user</button>
     {#if s.users.length === 0}
       <div class="text-xs text-muted p-2">No users yet.</div>
     {:else}
@@ -155,10 +158,12 @@
       <!-- password -->
       <div class="mt-4 border-t border-line pt-3">
         <div class="text-xs text-muted mb-1">Set password</div>
-        <div class="flex gap-2">
-          <input class="flex-1 bg-elevated border border-line rounded px-2 py-1 text-sm" type="password" placeholder="new password (min 6)" bind:value={newPass} autocomplete="new-password" />
-          <button class="text-xs bg-green-700 hover:bg-green-600 text-white rounded px-3 disabled:opacity-40"
-            disabled={s.busy || newPass.length < 6} onclick={setPassword}>Set</button>
+        <div class="space-y-2 max-w-xs">
+          <PasswordInput bind:value={newPass} placeholder="new password (min 6)" />
+          <PasswordInput bind:value={newPass2} placeholder="confirm password" />
+          {#if newPass2 && newPass !== newPass2}<div class="text-[11px] text-red-500">Passwords don't match.</div>{/if}
+          <button class="text-xs bg-green-700 hover:bg-green-600 text-white rounded px-3 py-1.5 disabled:opacity-40"
+            disabled={s.busy || !setPwOk} onclick={setPassword}>Set password</button>
         </div>
       </div>
 
@@ -198,12 +203,13 @@
   <Modal title="New user" onClose={() => (showAdd = false)} max="max-w-sm">
     <form class="space-y-2" onsubmit={(e) => { e.preventDefault(); addUser(); }}>
       <input class="w-full bg-elevated border border-line rounded px-2 py-1.5 text-sm" placeholder="username" bind:value={newUser} autocomplete="off" />
-      <!-- svelte-ignore a11y_autofocus -->
-      <input class="w-full bg-elevated border border-line rounded px-2 py-1.5 text-sm" placeholder="password (min 6)" type="password" bind:value={newUserPass} autocomplete="new-password" />
+      <PasswordInput bind:value={newUserPass} placeholder="password (min 6)" />
+      <PasswordInput bind:value={newUserPass2} placeholder="confirm password" />
+      {#if newUserPass2 && newUserPass !== newUserPass2}<div class="text-[11px] text-red-500">Passwords don't match.</div>{/if}
       <div class="flex justify-end gap-2 pt-1">
         <button type="button" class="text-xs border border-line rounded px-3 py-1.5 text-muted hover:text-content" onclick={() => (showAdd = false)}>Cancel</button>
         <button type="submit" class="text-xs bg-green-700 hover:bg-green-600 text-white rounded px-3 py-1.5 disabled:opacity-40"
-          disabled={s.busy || !newUser.trim() || newUserPass.length < 6}>Add user</button>
+          disabled={s.busy || !addOk}>Add user</button>
       </div>
     </form>
   </Modal>
