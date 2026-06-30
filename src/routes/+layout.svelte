@@ -24,9 +24,13 @@
   let statsOpen = $state(false);
   let helpOpen = $state(false);
 
+  /**
+   * @typedef {{authEnabled:boolean, authed:boolean, needsBootstrap:boolean, loginPolicy?:string, user:{username:string}|null}} AuthState
+   */
+
   // Auth gate: null until the status check resolves. When auth is enabled and the
   // visitor isn't signed in, the app is replaced by the login screen.
-  let auth = $state(/** @type {{authEnabled:boolean, authed:boolean, needsBootstrap:boolean, loginPolicy?:string, user:{username:string}|null}|null} */ (null));
+  let auth = $state(/** @type {AuthState|null} */ (null));
   let gated = $derived(Boolean(auth && auth.authEnabled && !auth.authed));
 
   async function logout() { try { await api.authLogout(); } catch {} location.reload(); }
