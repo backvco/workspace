@@ -27,19 +27,21 @@ banner
 REQ_PORT="${1:-8080}"
 USER_NAME="$(id -un)"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bin/lib/service.sh"
 
-port_busy() { command -v ss >/dev/null 2>&1 && sudo ss -ltnH "sport = :$1" 2>/dev/null | grep -q .; }
+port_busy() { port_listening "$1"; }
 
 # A code-server already serving on loopback? Return 127.0.0.1:<port>, else empty.
 detect_running() {
   local addr=""
-  if command -v systemctl >/dev/null 2>&1 && \
+  if os_is_mac; then
+    svc_status workspace-code-server && \
+      addr="$(sed -n 's/^bind-addr:[[:space:]]*//p' "$HOME/.config/code-server/config.yaml" 2>/dev/null | head -1)"
+  elif command -v systemctl >/dev/null 2>&1 && \
      { systemctl is-active --quiet "code-server@${USER_NAME}" 2>/dev/null || systemctl is-active --quiet workspace-code-server 2>/dev/null; }; then
     addr="$(sed -n 's/^bind-addr:[[:space:]]*//p' "$HOME/.config/code-server/config.yaml" 2>/dev/null | head -1)"
   fi
-  if [ -z "$addr" ] && command -v ss >/dev/null 2>&1; then
-    addr="$(sudo ss -ltnpH 2>/dev/null | grep -i 'code-server' | grep -oE '127\.0\.0\.1:[0-9]+' | head -1)"
-  fi
+  [ -n "$addr" ] || addr="$(proc_listen_addr code-server)"
   case "$addr" in 127.0.0.1:[0-9]*) echo "$addr" ;; *) : ;; esac
 }
 
@@ -67,7 +69,16 @@ else
   PORT="$(free_port "$REQ_PORT")"
   [ "$PORT" != "$REQ_PORT" ] && echo "Port $REQ_PORT is in use; using $PORT instead."
 
-  if command -v systemctl >/dev/null 2>&1; then
+  if os_is_mac; then
+    echo "Installing the code-server LaunchDaemon on 127.0.0.1:${PORT} (localhost only)..."
+    svc_install_launchd workspace-code-server "$USER_NAME" "$HOME" \
+      "HOME=${HOME}
+PATH=/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:${HOME}/.local/bin" \
+      "" "$CS" --bind-addr "127.0.0.1:${PORT}" --auth none --disable-telemetry --disable-update-check
+    sleep 1
+    if port_busy "$PORT"; then echo "code-server is listening on 127.0.0.1:${PORT}."
+    else echo "WARNING: code-server did not come up on :${PORT} - check: $(svc_log_hint workspace-code-server)"; fi
+  elif command -v systemctl >/dev/null 2>&1; then
     echo "Installing the code-server service on 127.0.0.1:${PORT} (localhost only)..."
     sudo tee /etc/systemd/system/workspace-code-server.service >/dev/null <<UNIT
 [Unit]

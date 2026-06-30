@@ -28,6 +28,9 @@ ART
 }
 banner
 
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bin/lib/service.sh"
+
 DOMAIN="${1:?usage: bin/setup-tls <domain> [ui_port] [--dns <provider>] [--port <https_port>] [--allow <cidrs>]}"; shift
 UI_PORT=3000
 DNS_PROVIDER=""
@@ -69,24 +72,40 @@ esac
 # Don't fight an existing reverse proxy on the ports we need - emit an nginx config
 # instead. On 443 we also use :80 (ACME/redirect); a custom port uses only itself.
 # Our OWN Caddy already owning those ports is fine (a re-run): we rewrite + reload.
-if [ "$HTTPS_PORT" = 443 ]; then portfilter='sport = :80 or sport = :443'; else portfilter="sport = :$HTTPS_PORT"; fi
+# (lsof, not `ss`, for the port checks - works on both Linux and macOS.)
+if [ "$HTTPS_PORT" = 443 ]; then portlist="80 443"; else portlist="$HTTPS_PORT"; fi
 ours=0
-if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet caddy 2>/dev/null; then ours=1; fi
-if command -v ss >/dev/null 2>&1 && sudo ss -ltnpH "$portfilter" 2>/dev/null | grep -qi caddy; then ours=1; fi
-if [ "$ours" = 0 ] && command -v ss >/dev/null 2>&1 && ss -ltnH "$portfilter" 2>/dev/null | grep -q .; then
-  echo "Something other than Caddy is already listening on the port(s) Caddy needs ($portfilter)."
-  echo "If you use nginx, add this and run 'sudo certbot --nginx -d $DOMAIN':"
-  echo
-  "$(dirname "$0")/print-proxy" nginx "$DOMAIN" "$UI_PORT" "$ALLOW_CIDRS"
-  exit 1
+if os_is_mac; then
+  svc_status caddy && ours=1
+else
+  command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet caddy 2>/dev/null && ours=1
+fi
+for p in $portlist; do
+  case "$(port_listener_name "$p")" in *[Cc]addy*) ours=1 ;; esac
+done
+if [ "$ours" = 0 ]; then
+  for p in $portlist; do
+    if port_listening "$p"; then
+      echo "Something other than Caddy is already listening on the port(s) Caddy needs ($portlist)."
+      echo "If you use nginx, add this and run 'sudo certbot --nginx -d $DOMAIN':"
+      echo
+      "$(dirname "$0")/print-proxy" nginx "$DOMAIN" "$UI_PORT" "$ALLOW_CIDRS"
+      exit 1
+    fi
+  done
 fi
 
-# Install the Caddy binary (optionally WITH a DNS-provider module) + a systemd unit.
+# Install the Caddy binary (optionally WITH a DNS-provider module) + a service.
+# Cross-platform: `brew install caddy` ships a vanilla build with no DNS-01
+# provider plugins, so this custom-built-binary path is needed for DNS-01 on
+# macOS too, not just Linux - hence the os=mac branch below rather than gating
+# this whole function behind os_is_mac().
 install_caddy_binary() {
-  local module="${1:-}" arch a url tmp
+  local module="${1:-}" arch a osname url tmp
   arch="$(uname -m)"
   case "$arch" in x86_64|amd64) a=amd64 ;; aarch64|arm64) a=arm64 ;; armv7l|armv7) a=armv7 ;; *) a=amd64 ;; esac
-  url="https://caddyserver.com/api/download?os=linux&arch=$a"
+  osname=linux; os_is_mac && osname=mac
+  url="https://caddyserver.com/api/download?os=$osname&arch=$a"
   [ -n "$module" ] && url="$url&p=github.com/caddy-dns/$module"
   # Download to a temp file then mv into place: a running caddy holds the binary
   # open, so writing it directly fails with "text file busy" (curl error 23). A
@@ -95,10 +114,43 @@ install_caddy_binary() {
   curl -fsSL -o "$tmp" "$url" || { echo "ERROR: failed to download Caddy from $url"; rm -f "$tmp"; exit 1; }
   chmod +x "$tmp"
   sudo mv "$tmp" /usr/local/bin/caddy
-  sudo chown root:root /usr/local/bin/caddy 2>/dev/null || true
-  id caddy >/dev/null 2>&1 || sudo useradd --system --create-home --home-dir /var/lib/caddy --shell /usr/sbin/nologin caddy 2>/dev/null || true
+  sudo chown root:wheel /usr/local/bin/caddy 2>/dev/null || sudo chown root:root /usr/local/bin/caddy 2>/dev/null || true
   sudo mkdir -p /etc/caddy
-  sudo tee /etc/systemd/system/caddy.service >/dev/null <<UNIT
+
+  if os_is_mac; then
+    # No dedicated caddy system user (mirrors workspace-api/ui, which also run as
+    # the installing user rather than a dedicated account) - 80/443 need root on
+    # macOS too, so this LaunchDaemon runs as root (no UserName override) rather
+    # than chasing setcap-equivalent low-port binding for an unprivileged user.
+    # /etc/caddy/dns.env is sourced (not EnvironmentFile=, launchd has none).
+    local logdir; logdir="$(svc_log_dir)"; mkdir -p "$logdir" 2>/dev/null || sudo mkdir -p "$logdir"
+    sudo tee /Library/LaunchDaemons/com.workspace.caddy.plist >/dev/null <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.workspace.caddy</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>set -a; [ -f /etc/caddy/dns.env ] &amp;&amp; . /etc/caddy/dns.env; exec /usr/local/bin/caddy run --config /etc/caddy/Caddyfile</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>${logdir}/caddy.log</string>
+  <key>StandardErrorPath</key><string>${logdir}/caddy.log</string>
+</dict>
+</plist>
+PLIST
+    sudo chown root:wheel /Library/LaunchDaemons/com.workspace.caddy.plist
+    sudo chmod 644 /Library/LaunchDaemons/com.workspace.caddy.plist
+    sudo launchctl bootout system/com.workspace.caddy >/dev/null 2>&1 || true
+    sudo launchctl bootstrap system /Library/LaunchDaemons/com.workspace.caddy.plist
+    sudo launchctl enable system/com.workspace.caddy
+  else
+    id caddy >/dev/null 2>&1 || sudo useradd --system --create-home --home-dir /var/lib/caddy --shell /usr/sbin/nologin caddy 2>/dev/null || true
+    sudo tee /etc/systemd/system/caddy.service >/dev/null <<UNIT
 [Unit]
 Description=Caddy
 After=network-online.target
@@ -116,8 +168,9 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE
 [Install]
 WantedBy=multi-user.target
 UNIT
-  sudo systemctl daemon-reload
-  sudo systemctl enable caddy
+    sudo systemctl daemon-reload
+    sudo systemctl enable caddy
+  fi
   BINARY_CADDY=1   # we replaced the binary - a reload won't switch to it, must restart
 }
 
@@ -170,7 +223,17 @@ fi
 # --- decide how to apply without disturbing an existing/foreign Caddy ---
 BINARY_CADDY=0
 running_bin=""; frag=""; foreign=0
-if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet caddy 2>/dev/null; then
+if os_is_mac; then
+  # No FragmentPath/ExecStart introspection equivalent on launchd - best effort:
+  # our own LaunchDaemon means "ours"; a caddy binary that's already running but
+  # NOT under our LaunchDaemon (e.g. `brew services start caddy` by hand) is foreign.
+  if svc_exists caddy; then
+    running_bin=/usr/local/bin/caddy
+  elif command -v caddy >/dev/null 2>&1 && pgrep -x caddy >/dev/null 2>&1; then
+    foreign=1
+    running_bin="$(command -v caddy)"
+  fi
+elif command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet caddy 2>/dev/null; then
   frag="$(systemctl show -p FragmentPath --value caddy 2>/dev/null)"
   running_bin="$(systemctl show -p ExecStart --value caddy 2>/dev/null | sed -n 's/.*path=\([^ ;}]*\).*/\1/p' | head -1)"
   [ -n "$running_bin" ] || running_bin="$(systemctl show -p ExecStart --value caddy 2>/dev/null | awk '{print $1; exit}')"
@@ -200,14 +263,17 @@ elif [ "$module_ok" = 0 ]; then
   install_caddy_binary "$dns_module"
 elif ! command -v caddy >/dev/null 2>&1; then
   echo "Installing Caddy..."
-  if   command -v apt-get >/dev/null 2>&1; then
+  # macOS always goes through install_caddy_binary (not brew): brew's caddy
+  # formula isn't a managed service, and we want one LaunchDaemon-based install
+  # path so restart/uninstall/doctor all agree on how Caddy is being run.
+  if os_is_mac; then install_caddy_binary
+  elif command -v apt-get >/dev/null 2>&1; then
     sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg
     curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
     curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
     sudo apt-get update && sudo apt-get install -y caddy
   elif command -v pacman >/dev/null 2>&1; then sudo pacman -S --noconfirm caddy
   elif command -v apk    >/dev/null 2>&1; then sudo apk add caddy
-  elif command -v brew   >/dev/null 2>&1; then brew install caddy
   else install_caddy_binary
   fi
 fi
@@ -252,10 +318,30 @@ if ! validate_out="$(sudo "$caddybin" validate --adapter caddyfile --config "$CA
   exit 1
 fi
 
-caddy_log() { echo "Recent Caddy log:"; sudo journalctl -u caddy -n 30 --no-pager 2>/dev/null | sed 's/^/  /'; }
+caddy_log() {
+  echo "Recent Caddy log:"
+  if os_is_mac; then tail -n 30 "$(svc_log_dir)/caddy.log" 2>/dev/null | sed 's/^/  /'
+  else sudo journalctl -u caddy -n 30 --no-pager 2>/dev/null | sed 's/^/  /'; fi
+}
 
 # --- apply: reload (no downtime for other sites); restart only on a binary swap ---
-if command -v systemctl >/dev/null 2>&1; then
+if os_is_mac; then
+  applied=0
+  if [ "$BINARY_CADDY" = 1 ]; then
+    svc_restart caddy && applied=1 || true
+  elif sudo "$caddybin" reload --config "$CADDYFILE" 2>/dev/null; then
+    applied=1
+  elif svc_restart caddy; then
+    applied=1
+  fi
+  if [ "$applied" != 1 ]; then
+    echo "ERROR: Caddy failed to start/reload with the new config - rolling back."
+    caddy_log
+    if [ "$foreign" = 1 ]; then sudo rm -f "$confd_file"
+    elif [ -n "$backup" ]; then sudo cp "$backup" "$CADDYFILE"; svc_restart caddy 2>/dev/null || true; fi
+    exit 1
+  fi
+elif command -v systemctl >/dev/null 2>&1; then
   applied=0
   if [ "$BINARY_CADDY" = 1 ]; then
     sudo systemctl restart caddy && applied=1 || true
@@ -280,11 +366,10 @@ url="https://$DOMAIN"; [ "$HTTPS_PORT" != 443 ] && url="https://$DOMAIN:$HTTPS_P
 # --- verify: Caddy on the RIGHT port, a real cert, AND the backend reachable ---
 # 1) Did Caddy actually bind our port? If not, it failed to start that site - fail
 #    fast with its log rather than waiting 2 minutes for a cert that can't come.
-if command -v ss >/dev/null 2>&1; then
+if command -v lsof >/dev/null 2>&1; then
   listening=0
   for _ in 1 2 3 4 5 6; do
-    # -p shows the process name so we can confirm it's Caddy (not just any listener).
-    if sudo ss -ltnpH "sport = :$HTTPS_PORT" 2>/dev/null | grep -qi caddy; then listening=1; break; fi
+    case "$(port_listener_name "$HTTPS_PORT")" in *[Cc]addy*) listening=1; break ;; esac
     sleep 1
   done
   if [ "$listening" != 1 ]; then
@@ -309,7 +394,7 @@ done
 echo
 
 backend_up=0
-if command -v ss >/dev/null 2>&1 && sudo ss -ltnH "sport = :$UI_PORT" 2>/dev/null | grep -q .; then backend_up=1; fi
+port_listening "$UI_PORT" && backend_up=1
 
 if [ "$code" = 000 ]; then
   echo "FAILED: the HTTPS certificate did not issue (no handshake at $url)."

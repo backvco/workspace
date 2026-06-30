@@ -36,22 +36,45 @@ write_env_line() { # <file> <key> <value>
 
 # --- Docker + Postgres container provisioning (opt-in) ---------------------------
 ensure_docker() {
-  if command -v docker >/dev/null 2>&1; then return 0; fi
-  echo "Installing Docker..."
-  case "$PM" in
-    apt-get) curl -fsSL https://get.docker.com | sh ;;                 # Debian/Ubuntu
-    dnf)     sudo dnf install -y docker || curl -fsSL https://get.docker.com | sh ;;   # Amazon Linux 2023 / Fedora
-    yum)     sudo yum install -y docker \
-               || sudo amazon-linux-extras install -y docker 2>/dev/null \
-               || curl -fsSL https://get.docker.com | sh ;;            # Amazon Linux 2 / RHEL
-    pacman)  sudo pacman -S --noconfirm docker ;;
-    apk)     sudo apk add docker ;;
-    brew)    brew install --cask docker
-             echo "Launch Docker Desktop, then re-run: ./bin/install-deps --docker-postgres"; exit 0 ;;
-  esac
-  sudo systemctl enable --now docker 2>/dev/null || true
-  sudo usermod -aG docker "$(id -un)" 2>/dev/null || true
-  echo "Note: you may need to log out/in (or run 'newgrp docker') to use docker without sudo."
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "Installing Docker..."
+    case "$PM" in
+      apt-get) curl -fsSL https://get.docker.com | sh ;;                 # Debian/Ubuntu
+      dnf)     sudo dnf install -y docker || curl -fsSL https://get.docker.com | sh ;;   # Amazon Linux 2023 / Fedora
+      yum)     sudo yum install -y docker \
+                 || sudo amazon-linux-extras install -y docker 2>/dev/null \
+                 || curl -fsSL https://get.docker.com | sh ;;            # Amazon Linux 2 / RHEL
+      pacman)  sudo pacman -S --noconfirm docker ;;
+      apk)     sudo apk add docker ;;
+      brew)    brew install --cask docker ;;
+    esac
+    if [ "$PM" = brew ]; then :
+    else
+      sudo systemctl enable --now docker 2>/dev/null || true
+      sudo usermod -aG docker "$(id -un)" 2>/dev/null || true
+      echo "Note: you may need to log out/in (or run 'newgrp docker') to use docker without sudo."
+    fi
+  fi
+
+  if [ "$PM" = brew ]; then
+    # Docker Desktop is a GUI app - the `docker` CLI doesn't work until it's
+    # actually running. Launch + wait, mirroring the Xcode Command Line Tools
+    # wait loop further down (also an async GUI installer).
+    if ! docker info >/dev/null 2>&1; then
+      echo "Starting Docker Desktop..."
+      open -a Docker 2>/dev/null || true
+      printf 'Waiting for Docker Desktop to start'
+      for _ in $(seq 1 60); do
+        docker info >/dev/null 2>&1 && break
+        printf '.'; sleep 5
+      done
+      echo
+      docker info >/dev/null 2>&1 || {
+        echo "WARNING: Docker Desktop did not come up - open it manually, then re-run: ./bin/install-deps --docker-postgres"
+        exit 0
+      }
+    fi
+  fi
 }
 
 provision_postgres_docker() {

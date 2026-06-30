@@ -94,12 +94,17 @@ function deployDetached() {
   child.unref();
 }
 
-// Restart a workspace-* systemd unit, detached. A short sleep lets the HTTP
-// response for the triggering request finish flushing before systemd kills
-// the process — matters when the unit being restarted is our own (the API).
+// Restart a workspace-* service, detached. A short sleep lets the HTTP response
+// for the triggering request finish flushing before the service manager kills
+// the process — matters when the service being restarted is our own (the API).
+// systemd on Linux; a LaunchDaemon (bin/lib/service.sh's naming: "workspace-api"
+// -> label "com.workspace.api") on macOS.
 function restartServiceDetached(unit) {
   const fd = openSync(DEPLOY_LOG, 'a');
-  const child = spawn('bash', ['-c', `sleep 0.3 && sudo systemctl restart ${unit}`], {
+  const restartCmd = process.platform === 'darwin'
+    ? `sudo launchctl kickstart -k system/com.workspace.${unit.replace(/^workspace-/, '')}`
+    : `sudo systemctl restart ${unit}`;
+  const child = spawn('bash', ['-c', `sleep 0.3 && ${restartCmd}`], {
     detached: true, stdio: ['ignore', fd, fd],
   });
   child.unref();

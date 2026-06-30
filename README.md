@@ -173,7 +173,8 @@ node server/index.js                  # API on :5301
 npm run build && PORT=3000 node build  # UI  on :3000
 ```
 
-To keep both running across reboots, install them as systemd services (Linux):
+To keep both running across reboots, install them as background services
+(systemd on Linux, LaunchDaemons on macOS):
 
 ```bash
 ./bin/setup-service          # creates + enables workspace-api and workspace-ui
@@ -209,7 +210,7 @@ The only requirement is routing `/api` + `/ws` (with WebSocket upgrade headers) 
 
 Interactive and non-destructive by default — it asks before each step and never
 deletes your checkout, `.env`, or project files unless you opt in. It can remove the
-systemd services (`workspace-api`, `workspace-ui`, `workspace-code-server`), our Caddy
+background services (`workspace-api`, `workspace-ui`, `workspace-code-server`), our Caddy
 drop-in (leaving any other sites a shared Caddy serves, and restoring its backup), the
 DNS-01 credentials, code-server, and the Docker Postgres container (with a second
 confirmation before deleting its data volume).

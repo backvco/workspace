@@ -19,6 +19,7 @@ ART
 banner
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bin/lib/service.sh"
 ask() { # ask "<prompt>" -> 0 if yes. Default NO (safe). Reads /dev/tty so it works under pipes.
   local a=""
   if [ -r /dev/tty ]; then printf '%s [y/N]: ' "$1" > /dev/tty; read -r a < /dev/tty || a=""; fi
@@ -30,33 +31,37 @@ echo "This removes services and optional components the installer added. Nothing
 echo "deleted without you confirming it. Repo dir: $REPO"
 echo
 
-# --- 1. systemd services (workspace-api, workspace-ui, workspace-code-server) ---
-if have systemctl; then
-  for unit in workspace-ui workspace-api workspace-code-server; do
-    if systemctl list-unit-files 2>/dev/null | grep -q "^${unit}.service"; then
-      if ask "Stop + remove the ${unit} service?"; then
-        sudo systemctl disable --now "${unit}.service" 2>/dev/null
-        sudo rm -f "/etc/systemd/system/${unit}.service"
-        echo "  removed ${unit}"
-      fi
+# --- 1. services (workspace-api, workspace-ui, workspace-code-server) ---
+for unit in workspace-ui workspace-api workspace-code-server; do
+  if svc_exists "$unit"; then
+    if ask "Stop + remove the ${unit} service?"; then
+      svc_remove "$unit"
+      echo "  removed ${unit}"
     fi
-  done
-  sudo systemctl daemon-reload 2>/dev/null
-fi
+  fi
+done
+os_is_mac || sudo systemctl daemon-reload 2>/dev/null
 
 # --- 2. Caddy: our drop-in / managed config (leave a shared Caddy's other sites alone) ---
 if [ -f /etc/caddy/Caddyfile ] || ls /etc/caddy/conf.d/workspace-*.caddy >/dev/null 2>&1; then
   if ask "Remove our Caddy config (drop-ins + restore backup if present)?"; then
     sudo rm -f /etc/caddy/conf.d/workspace-*.caddy
     [ -f /etc/caddy/Caddyfile.workspace.bak ] && sudo mv /etc/caddy/Caddyfile.workspace.bak /etc/caddy/Caddyfile
-    sudo systemctl reload caddy 2>/dev/null || sudo systemctl restart caddy 2>/dev/null || true
+    if os_is_mac; then
+      sudo /usr/local/bin/caddy reload --config /etc/caddy/Caddyfile 2>/dev/null || svc_restart caddy 2>/dev/null || true
+    else
+      sudo systemctl reload caddy 2>/dev/null || sudo systemctl restart caddy 2>/dev/null || true
+    fi
     echo "  Caddy config cleaned (other sites untouched)"
   fi
-  if systemctl list-unit-files 2>/dev/null | grep -q '^caddy.service' && ask "Also stop + remove Caddy itself (only if WE installed it)?"; then
-    sudo systemctl disable --now caddy 2>/dev/null
-    sudo rm -f /etc/systemd/system/caddy.service /usr/local/bin/caddy
-    sudo systemctl daemon-reload 2>/dev/null
+  if svc_exists caddy && ask "Also stop + remove Caddy itself (only if WE installed it)?"; then
+    svc_remove caddy
+    sudo rm -f /usr/local/bin/caddy
+    os_is_mac || sudo systemctl daemon-reload 2>/dev/null
     echo "  removed Caddy"
+  elif have brew && brew list --formula 2>/dev/null | grep -qx caddy && ask "Also uninstall the brew-installed Caddy itself?"; then
+    brew uninstall caddy
+    echo "  removed Caddy (brew)"
   fi
 fi
 
@@ -70,7 +75,8 @@ fi
 
 # --- 4. code-server (the binary the installer added) ---
 if have code-server && ask "Uninstall code-server (VS Code) itself?"; then
-  if have dpkg && dpkg -l code-server >/dev/null 2>&1; then sudo dpkg -r code-server
+  if have brew && brew list --formula 2>/dev/null | grep -q code-server; then brew uninstall code-server
+  elif have dpkg && dpkg -l code-server >/dev/null 2>&1; then sudo dpkg -r code-server
   elif have rpm && rpm -q code-server >/dev/null 2>&1; then sudo rpm -e code-server
   else sudo rm -f "$(command -v code-server)"; fi
   rm -rf "$HOME/.config/code-server" "$HOME/.local/share/code-server" 2>/dev/null
@@ -87,6 +93,9 @@ if have docker && (docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx wor
       $D volume rm workspace-db-data >/dev/null 2>&1 && echo "  deleted volume workspace-db-data"
     fi
   fi
+fi
+if os_is_mac && [ -d /Applications/Docker.app ] && ask "Also uninstall Docker Desktop itself (brew cask)?"; then
+  brew uninstall --cask docker 2>/dev/null && echo "  removed Docker Desktop" || echo "  could not remove Docker Desktop - if it wasn't installed via 'brew install --cask docker', remove it from /Applications yourself"
 fi
 
 # --- 6. the repo + .env (explicit opt-in; default keep) ---

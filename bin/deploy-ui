@@ -15,14 +15,31 @@
 #     bin/deploy-ui --auto   # same, quieter (used by the auto-deploy watcher)
 set -euo pipefail
 cd "$(dirname "$0")/.." || exit 1   # repo root, wherever this checkout lives
+. "$(dirname "$0")/lib/service.sh"
 NPM="$(command -v npm || echo npm)"
 REV=$(git rev-parse --short HEAD 2>/dev/null || echo '?')
 
 # Serialize: only one deploy (manual or watcher) builds at a time.
-exec 9>/tmp/workspace-ui-deploy.lock
-if ! flock -w 300 9; then
-  echo "[deploy-ui] another deploy is in progress — skipping $REV" >&2
-  exit 1
+if command -v flock >/dev/null 2>&1; then
+  exec 9>/tmp/workspace-ui-deploy.lock
+  if ! flock -w 300 9; then
+    echo "[deploy-ui] another deploy is in progress — skipping $REV" >&2
+    exit 1
+  fi
+else
+  # macOS has no flock(1) - fall back to an atomic mkdir lock (portable, same
+  # 300s wait budget, same "skip if busy" outcome).
+  LOCKDIR=/tmp/workspace-ui-deploy.lock.d
+  waited=0
+  until mkdir "$LOCKDIR" 2>/dev/null; do
+    waited=$((waited + 1))
+    if [ "$waited" -ge 300 ]; then
+      echo "[deploy-ui] another deploy is in progress — skipping $REV" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+  trap 'rmdir "$LOCKDIR" 2>/dev/null || true' EXIT
 fi
 
 echo "[deploy-ui] building $REV → build.next …"
@@ -40,7 +57,7 @@ rm -rf build.prev
 mv build.next build
 
 echo "[deploy-ui] restarting workspace-ui …"
-sudo systemctl restart workspace-ui
+svc_restart workspace-ui
 # Stamp the commit that's now serving, so the watcher knows what's deployed
 # (and catches anything that landed while it wasn't running).
 git rev-parse HEAD > .deploy-rev

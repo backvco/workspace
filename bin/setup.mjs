@@ -390,12 +390,17 @@ async function main() {
       const retry = `./bin/setup-tls ${domain} ${uiPort}${tlsKind === 'dns' ? ` --dns ${tlsProv}` : ''}${httpsPort !== '443' ? ` --port ${httpsPort}` : ''}`;
       say('TLS setup did NOT complete - see the error just above.');
       console.log(`Fix it, then retry just this step (the error will be the last thing printed):\n  ${retry}`);
-      console.log('More detail:  journalctl -u caddy -n 50 --no-pager');
+      console.log(process.platform === 'darwin'
+        ? `More detail:  tail -50 ${process.env.HOME}/Library/Logs/Workspace/caddy.log`
+        : 'More detail:  journalctl -u caddy -n 50 --no-pager');
       return;
     }
     // Boot services for any non-skip path (independent of who manages TLS).
-    if (tls !== 'skip' && tls !== 'tailscale' && has('systemctl') &&
-        await yesno(`Install + start systemd services (API :${apiPort} + UI :${uiPort}) on boot?`, true))
+    // bin/setup-service itself picks systemd vs a macOS LaunchDaemon.
+    const canService = has('systemctl') || process.platform === 'darwin';
+    const svcKind = process.platform === 'darwin' ? 'LaunchDaemon' : 'systemd';
+    if (tls !== 'skip' && tls !== 'tailscale' && canService &&
+        await yesno(`Install + start ${svcKind} services (API :${apiPort} + UI :${uiPort}) on boot?`, true))
       svc = run('./bin/setup-service', [uiPort]);
 
     // This server is now reachable remotely. Auth is OFF by default, which means
@@ -414,8 +419,8 @@ async function main() {
   const url = domain ? `https://${domain}${httpsPort !== '443' ? ':' + httpsPort : ''}` : '';
   const selfProxy = tlsKind === 'self' || tlsKind === 'nginx';
   say('Setup complete');
-  if (svc && selfProxy) console.log(`Running as systemd services: API on 127.0.0.1:${apiPort}, UI on 127.0.0.1:${uiPort}.\nPoint your reverse proxy at them${domain ? ` and open ${url}` : ''}.`);
-  else if (svc) console.log(`Running as systemd services behind your reverse proxy. Open  ${url}`);
+  if (svc && selfProxy) console.log(`Running as ${svcKind} services: API on 127.0.0.1:${apiPort}, UI on 127.0.0.1:${uiPort}.\nPoint your reverse proxy at them${domain ? ` and open ${url}` : ''}.`);
+  else if (svc) console.log(`Running as ${svcKind} services behind your reverse proxy. Open  ${url}`);
   else if (domain) console.log(`Run the production build behind your proxy:\n  node server/index.js              # API :${apiPort}\n  PORT=${uiPort} node build         # UI  :${uiPort}\nThen open  ${url}`);
   else console.log(`Start it in two terminals:\n  1) node server/index.js     # API :${apiPort}\n  2) npm run dev              # UI  :5300 (vite)\nThen open  http://localhost:5300`);
   console.log("\nLog in to the agent CLI before starting (required):  claude");

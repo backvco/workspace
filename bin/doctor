@@ -4,6 +4,7 @@
 # Exits non-zero if any hard check fails.
 set -uo pipefail
 cd "$(dirname "$0")/.." 2>/dev/null || true
+. "$(dirname "$0")/lib/service.sh"
 
 C_OK=$'\033[32m'; C_BAD=$'\033[31m'; C_WARN=$'\033[33m'; C_B=$'\033[1m'; C_0=$'\033[0m'
 fails=0
@@ -13,7 +14,7 @@ warn() { printf '  %s[warn]%s %s\n'   "$C_WARN" "$C_0" "$1"; [ -n "${2:-}" ] && 
 section(){ printf '\n%s%s%s\n' "$C_B" "$1" "$C_0"; }
 
 envget(){ sed -n "s/^$1=//p" .env 2>/dev/null | head -1; }
-listening(){ command -v ss >/dev/null 2>&1 && sudo ss -ltnH "sport = :$1" 2>/dev/null | grep -q .; }
+listening(){ port_listening "$1"; }
 
 APIPORT="$(envget WORKSPACE_PORT)";   APIPORT="${APIPORT:-5301}"
 CLAUDEBIN="$(envget WORKSPACE_CLAUDE_BIN)"; CLAUDEBIN="${CLAUDEBIN:-claude}"
@@ -58,8 +59,8 @@ fi
 section "Services"
 if listening "$APIPORT"; then ok "API listening on :$APIPORT"
   if curl -fsS "http://127.0.0.1:$APIPORT/api/health" >/dev/null 2>&1; then ok "API /api/health responds"
-  else bad "API up but /api/health failing" "journalctl -u workspace-api -n 40 --no-pager"; fi
-else bad "API not listening on :$APIPORT" "node server/index.js   (or sudo systemctl restart workspace-api)"; fi
+  else bad "API up but /api/health failing" "$(svc_log_hint workspace-api)"; fi
+else bad "API not listening on :$APIPORT" "node server/index.js   (or sudo systemctl restart workspace-api / sudo launchctl kickstart -k system/com.workspace.api)"; fi
 
 UIPORT="$(envget WORKSPACE_UI_PORT)"; UIPORT="${UIPORT:-3000}"
 if listening "$UIPORT"; then ok "UI (production build) on :$UIPORT"
@@ -69,14 +70,16 @@ else bad "UI not listening on :$UIPORT (prod) or :5300 (dev)" "local: npm run de
 if [ -n "$PUBURL" ] || [ -n "$PUBHOST" ]; then
   section "Public HTTPS"
   url="${PUBURL:-https://$PUBHOST}"
-  if command -v systemctl >/dev/null 2>&1; then
+  if os_is_mac; then
+    svc_status caddy && ok "Caddy service active" || warn "Caddy service not active" "sudo launchctl print system/com.workspace.caddy"
+  elif command -v systemctl >/dev/null 2>&1; then
     systemctl is-active --quiet caddy 2>/dev/null && ok "Caddy service active" || warn "Caddy service not active" "sudo systemctl status caddy"
   fi
   code="$(curl -sS --max-time 8 -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || echo 000)"
   case "$code" in
-    000) bad "no HTTPS handshake at $url (cert not issued or port unreachable)" "./bin/setup-tls <domain> --dns <provider>; journalctl -u caddy -n 50 --no-pager" ;;
+    000) bad "no HTTPS handshake at $url (cert not issued or port unreachable)" "./bin/setup-tls <domain> --dns <provider>; $(svc_log_hint caddy)" ;;
     502|503) bad "$url cert OK but backend $code (app not running)" "start the UI/API (see Services above)" ;;
-    5[0-9][0-9]) bad "$url returned HTTP $code (the app is erroring)" "journalctl -u workspace-ui -n 40 --no-pager  (often a missing ORIGIN - re-run ./bin/setup-service)" ;;
+    5[0-9][0-9]) bad "$url returned HTTP $code (the app is erroring)" "$(svc_log_hint workspace-ui)  (often a missing ORIGIN - re-run ./bin/setup-service)" ;;
     200|301|302|401|403) ok "$url is live (HTTP $code) with a valid certificate" ;;
     *) warn "$url returned HTTP $code" "" ;;
   esac
@@ -84,10 +87,10 @@ fi
 
 if [ -n "$(envget WORKSPACE_CODE_SERVER_URL)" ]; then
   section "Embedded VS Code (code-server)"
-  if systemctl is-active --quiet workspace-code-server 2>/dev/null || listening 8080; then
+  if svc_status workspace-code-server || listening 8080; then
     ok "code-server is running (localhost only)"
   else
-    bad "code-server not running" "sudo systemctl restart workspace-code-server (journalctl -u workspace-code-server -n 40)"
+    bad "code-server not running" "./bin/setup-code-server  ($(svc_log_hint workspace-code-server))"
   fi
   warn "/code is gated by app auth" "it is only protected when auth is ENABLED in Settings"
 fi
