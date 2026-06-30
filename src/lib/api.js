@@ -26,6 +26,10 @@ async function jsonSafe(path, opts = {}) {
 export const api = {
   stats: () => json('/api/stats'),
 
+  // --- self-update (workspace's own checkout) ---
+  version: () => json('/api/version'),
+  selfUpdate: () => json('/api/update', { method: 'POST' }),
+
   // --- clipboard explorer (pasted images, per workspace) ---
   clipboardList: () => json('/api/clipboard'),
   /** @param {string} name URL to the pasted image for the active project. */

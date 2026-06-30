@@ -17,6 +17,7 @@
   import Overview from '$lib/components/Overview.svelte';
   import { projectStore, initProjects } from '$lib/projects.svelte.js';
   import ThemeToggle from '$lib/components/ThemeToggle.svelte';
+  import UpdateBadge from '$lib/components/UpdateBadge.svelte';
   import { initTheme } from '$lib/theme.svelte.js';
 
   /** @type {{cpu:number, cores:number[], mem:{percent:number, usedGb:number, availGb:number, cachedGb:number, totalGb:number}} | null} */
@@ -137,6 +138,9 @@
           {/if}
         </div>
       {/if}
+
+      <!-- workspace update available (git remote ahead) -->
+      <UpdateBadge />
 
       <!-- help / tips -->
       <button
