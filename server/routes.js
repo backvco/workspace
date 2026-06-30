@@ -303,7 +303,8 @@ export function buildRouter(cfg) {
       try {
         writeFileSync(file, req.body);
       } catch (e) {
-        return (console.error('server error:', e?.message || e), res.status(500).json({ error: 'internal error' }));
+        console.error('server error:', e?.message || e);
+        return res.status(500).json({ error: 'internal error' });
       }
       let injected = false;
       const tabKey = req.query.tab;
