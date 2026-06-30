@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Edit", "Write", "Read", "Glob", "Grep", "Bash",
+      "WebFetch", "WebSearch", "TodoWrite", "Task", "NotebookEdit", "BashOutput"
+    ],
+    "deny": [
+      "Bash(sudo:*)",
+      "Bash(rm -rf:*)",
+      "Bash(rm -fr:*)",
+      "Bash(dd:*)",
+      "Bash(mkfs:*)",
+      "Bash(shutdown:*)",
+      "Bash(reboot:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git reset --hard:*)"
+    ]
+  }
+}

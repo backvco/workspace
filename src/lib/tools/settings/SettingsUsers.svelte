@@ -1,0 +1,278 @@
+<script>
+  // Users master-detail: left column = accounts; selecting one loads its detail
+  // (display name, email, set password, and that user's passkeys / devices).
+  import { api } from '$lib/api.js';
+  import Modal from '$lib/components/Modal.svelte';
+  import Avatar from '$lib/components/Avatar.svelte';
+  import PasswordInput from '$lib/components/PasswordInput.svelte';
+  import { enrollPasskey, passkeysSupported, deviceLabel } from '$lib/passkeys.js';
+  import EnrollCodeInput from '$lib/components/EnrollCodeInput.svelte';
+  import { s, flash, reload } from './store.svelte.js';
+
+  let selectedId = $state('');
+  let showAdd = $state(false);
+  let selected = $derived(s.users.find((u) => u.id === selectedId) || null);
+  let isSelf = $derived(!!selected && selected.id === s.status?.user?.id);
+
+  // Detail form fields (seeded when the selection changes).
+  let nameInput = $state(''); let emailInput = $state(''); let newPass = $state(''); let newPass2 = $state('');
+  let setPwOk = $derived(newPass.length >= 8 && newPass === newPass2);
+  /** @type {{id:string,name:string,addedAt:number}[]} */
+  let creds = $state([]);
+  let lastSeeded = '';
+
+  // New-user form.
+  let newUser = $state(''); let newUserPass = $state(''); let newUserPass2 = $state('');
+  let addOk = $derived(!!newUser.trim() && newUserPass.length >= 8 && newUserPass === newUserPass2);
+
+  // Auto-select the signed-in user (or the first) once users load.
+  $effect(() => {
+    if (!selectedId && s.users.length) selectUser(s.status?.user?.id || s.users[0].id);
+  });
+  // Re-seed the form whenever a different user is selected.
+  $effect(() => {
+    if (selected && selected.id !== lastSeeded) {
+      lastSeeded = selected.id;
+      nameInput = selected.name || ''; emailInput = selected.email || ''; newPass = ''; newPass2 = ''; issuedCode = null;
+    }
+  });
+
+  async function selectUser(/** @type {string} */ id) {
+    selectedId = id; creds = [];
+    try { creds = (await api.userPasskeys(id)).credentials; } catch {}
+    try { codeStatus = await api.passkeyEnrollCodeStatus(id); } catch { codeStatus = null; }
+  }
+  async function refreshCreds() { if (selectedId) { try { creds = (await api.userPasskeys(selectedId)).credentials; } catch {} } }
+
+  async function saveProfile() {
+    if (!selected) return;
+    s.busy = true;
+    const r = await api.authUpdateUser(selected.id, { name: nameInput.trim(), email: emailInput.trim() });
+    s.busy = false;
+    if (r.error) return flash(r.error, true);
+    flash('Profile saved.'); reload();
+  }
+  async function setPassword() {
+    if (!selected || !setPwOk) return;
+    s.busy = true;
+    const r = await api.authSetPassword(selected.id, newPass);
+    s.busy = false;
+    if (r.error) return flash(r.error, true);
+    newPass = ''; newPass2 = ''; flash(`Password updated for ${selected.username}.`);
+  }
+  async function addUser() {
+    if (!addOk) return;
+    s.busy = true;
+    const r = await api.authAddUser(newUser.trim(), newUserPass);
+    s.busy = false;
+    if (r.error) return flash(r.error, true);
+    const id = r.id; newUser = ''; newUserPass = ''; newUserPass2 = ''; showAdd = false;
+    flash('User added.'); await reload(); if (id) selectUser(id);
+  }
+  async function removeUser() {
+    if (!selected) return;
+    if (!confirm(`Delete user "${selected.username}"?`)) return;
+    const r = await api.authRemoveUser(selected.id);
+    if (r.error) return flash(r.error, true);
+    selectedId = ''; flash('User removed.'); reload();
+  }
+
+  // --- passkeys for the selected user ---
+  // Enrollment-code entry (shown when adding a NEW device is blocked from a
+  // password session). Display as ABC-123-XYZ; the server normalises on redeem.
+  let showCode = $state(''); let codeInput = $state('');
+  let codeOk = $derived(codeInput.replace(/[^A-Za-z0-9]/g, '').length === 9);
+
+  async function addOwnDevice() {
+    const name = (prompt('Name this passkey (e.g. which device it is):', deviceLabel()) || '').trim();
+    if (!name) return;
+    s.busy = true;
+    const r = await enrollPasskey(name);
+    s.busy = false;
+    if (r.code === 'enroll_blocked') { showCode = name; codeInput = ''; return; }
+    if (r.error) return flash(r.error, true);
+    flash('Passkey added.'); reload(); refreshCreds();
+  }
+  async function submitCode() {
+    if (!codeOk) return;
+    s.busy = true;
+    const r = await enrollPasskey(showCode, codeInput);
+    s.busy = false;
+    if (r.error) return flash(r.error, true);
+    showCode = ''; flash('Passkey added.'); reload(); refreshCreds();
+  }
+  async function removeCred(/** @type {string} */ credId) {
+    if (!selected || !confirm('Remove this passkey?')) return;
+    const r = await api.userRemovePasskey(selected.id, credId);
+    if (r.error) return flash(r.error, true);
+    flash('Passkey removed.'); reload(); refreshCreds();
+  }
+  async function resetAll() {
+    if (!selected || !confirm(`Remove ALL passkeys for "${selected.username}"? They'll sign in with their password until they enrol a new device.`)) return;
+    const r = await api.passkeyResetUser(selected.id);
+    if (r.error) return flash(r.error, true);
+    flash(`Removed ${r.removed} passkey${r.removed === 1 ? '' : 's'}.`); reload(); refreshCreds();
+  }
+  // Enrollment code shown inline in this user's panel so the admin can relay it.
+  // `issuedCode` holds the plaintext (only available right after generating — the
+  // server stores just a hash). `codeStatus` is what we can know on load: whether
+  // an unexpired code exists and how long is left (never the code itself).
+  /** @type {{code:string,expiresInMin:number}|null} */
+  let issuedCode = $state(null);
+  /** @type {{active:boolean,expiresInMin?:number}|null} */
+  let codeStatus = $state(null);
+  async function genCode() {
+    if (!selected) return;
+    const r = await api.passkeyEnrollCode(selected.id);
+    if (r.error) return flash(r.error, true);
+    issuedCode = { code: r.code, expiresInMin: r.expiresInMin };
+    codeStatus = { active: true, expiresInMin: r.expiresInMin };
+  }
+  async function revokeCode() {
+    if (!selected) return;
+    const r = await api.passkeyRevokeEnrollCode(selected.id);
+    if (r.error) return flash(r.error, true);
+    issuedCode = null; codeStatus = { active: false };
+  }
+</script>
+
+<div class="grid grid-cols-[14rem_1fr] gap-4 h-full min-h-0">
+  <!-- master list -->
+  <div class="rounded-lg border border-line bg-card p-2 overflow-auto">
+    <button class="w-full mb-2 text-xs bg-green-700 hover:bg-green-600 text-white rounded px-3 py-1.5"
+      onclick={() => { newUser = ''; newUserPass = ''; newUserPass2 = ''; showAdd = true; }}>+ New user</button>
+    {#if s.users.length === 0}
+      <div class="text-xs text-muted p-2">No users yet.</div>
+    {:else}
+      <ul>
+        {#each s.users as u (u.id)}
+          <li>
+            <button class="w-full text-left rounded px-2 py-1.5 text-sm flex items-center gap-2 {u.id === selectedId ? 'bg-elevated text-content' : 'text-muted hover:text-content hover:bg-elevated/50'}"
+              onclick={() => selectUser(u.id)}>
+              <Avatar src={u.avatar} name={u.name || u.username} size={28} />
+              <div class="min-w-0 flex-1">
+                <div class="flex items-center justify-between">
+                  <span class="truncate">{u.name || u.username}</span>
+                  {#if u.passkeyCount > 0}<span class="ml-2 shrink-0 text-[10px] text-muted">🔑 {u.passkeyCount}</span>{/if}
+                </div>
+                {#if u.name}<div class="text-[10px] text-muted truncate">{u.username}</div>{/if}
+              </div>
+            </button>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  </div>
+
+  <!-- detail -->
+  <div class="rounded-lg border border-line bg-card p-4 overflow-auto">
+    {#if !selected}
+      <div class="text-sm text-muted">Select a user.</div>
+    {:else}
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-2 min-w-0">
+          <Avatar src={selected.avatar} name={selected.name || selected.username} size={32} />
+          <div class="font-medium truncate">{selected.username}{#if isSelf}<span class="ml-2 text-xs text-muted">(you)</span>{/if}</div>
+        </div>
+        <button class="text-xs text-red-500 hover:text-red-400 shrink-0" onclick={removeUser}>Delete user</button>
+      </div>
+
+      <!-- profile -->
+      <div class="mt-3 grid grid-cols-[6rem_1fr] items-center gap-2 text-sm">
+        <span class="text-xs text-muted">Display name</span>
+        <input class="bg-elevated border border-line rounded px-2 py-1" bind:value={nameInput} placeholder="(optional)" />
+        <span class="text-xs text-muted">Email</span>
+        <input class="bg-elevated border border-line rounded px-2 py-1" bind:value={emailInput} placeholder="(optional)" type="email" autocomplete="off" />
+      </div>
+      <button class="mt-2 text-xs bg-green-700 hover:bg-green-600 text-white rounded px-3 py-1 disabled:opacity-40"
+        disabled={s.busy} onclick={saveProfile}>Save profile</button>
+
+      <!-- password -->
+      <div class="mt-4 border-t border-line pt-3">
+        <div class="text-xs text-muted mb-1">Set password</div>
+        <div class="space-y-2 max-w-xs">
+          <PasswordInput bind:value={newPass} placeholder="new password (min 8)" />
+          <PasswordInput bind:value={newPass2} placeholder="confirm password" />
+          {#if newPass2 && newPass !== newPass2}<div class="text-[11px] text-red-500">Passwords don't match.</div>{/if}
+          <button class="text-xs bg-green-700 hover:bg-green-600 text-white rounded px-3 py-1.5 disabled:opacity-40"
+            disabled={s.busy || !setPwOk} onclick={setPassword}>Set password</button>
+        </div>
+      </div>
+
+      <!-- passkeys -->
+      <div class="mt-4 border-t border-line pt-3">
+        <div class="text-xs text-muted mb-1">Passkeys / devices</div>
+        {#if creds.length === 0}
+          <div class="text-xs text-muted mb-2">No passkeys enrolled.</div>
+        {:else}
+          <ul class="mb-2 divide-y divide-line">
+            {#each creds as c (c.id)}
+              <li class="flex items-center justify-between py-1.5 text-xs">
+                <span>{c.name} <span class="text-muted">· added {new Date(c.addedAt).toLocaleDateString()}</span></span>
+                <button class="text-red-500 hover:text-red-400" onclick={() => removeCred(c.id)}>Remove</button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        <div class="flex flex-wrap gap-2">
+          {#if isSelf && passkeysSupported()}
+            <button class="text-xs bg-green-700 hover:bg-green-600 text-white rounded px-3 py-1 disabled:opacity-40" disabled={s.busy} onclick={addOwnDevice}>Add this device</button>
+          {/if}
+          {#if creds.length > 0}
+            <button class="text-xs border border-line rounded px-3 py-1 text-amber-600 dark:text-amber-400 hover:bg-elevated" onclick={resetAll}>Reset all passkeys</button>
+          {/if}
+          <button class="text-xs border border-line rounded px-3 py-1 text-muted hover:text-content hover:bg-elevated" onclick={genCode}>Generate enrollment code</button>
+        </div>
+        {#if issuedCode}
+          <div class="mt-3 rounded-lg border border-green-600/40 bg-green-600/10 p-3 relative">
+            <button class="absolute top-2 right-2 text-muted hover:text-red-500 leading-none text-sm" title="Revoke code" onclick={revokeCode}>✕</button>
+            <div class="text-[11px] text-muted mb-1">One-time enrollment code for <span class="font-medium text-content">{selected.username}</span> — valid {issuedCode.expiresInMin} min, single use.</div>
+            <div class="flex items-center gap-2">
+              <span class="font-mono text-lg tracking-[0.2em] text-green-700 dark:text-green-300 select-all">{issuedCode.code}</span>
+              <button class="text-[11px] border border-line rounded px-2 py-0.5 text-muted hover:text-content hover:bg-elevated"
+                onclick={() => navigator.clipboard?.writeText(issuedCode?.code ?? '')}>Copy</button>
+            </div>
+          </div>
+        {:else if codeStatus?.active}
+          <div class="mt-3 rounded-lg border border-line bg-elevated/50 p-3 relative">
+            <button class="absolute top-2 right-2 text-muted hover:text-red-500 leading-none text-sm" title="Revoke code" onclick={revokeCode}>✕</button>
+            <div class="text-[11px] text-muted">An enrollment code is active for <span class="font-medium text-content">{selected.username}</span> — expires in {codeStatus.expiresInMin} min. The code itself is shown only once when generated; revoke (✕) and regenerate if it was lost.</div>
+          </div>
+        {/if}
+        {#if !isSelf}
+          <div class="mt-2 text-[11px] text-muted">A user adds their own devices on the device itself. Give them a one-time enrollment code if they've lost access to all their passkeys.</div>
+        {/if}
+      </div>
+    {/if}
+  </div>
+</div>
+
+{#if showAdd}
+  <Modal title="New user" onClose={() => (showAdd = false)} max="max-w-sm">
+    <form class="space-y-2" onsubmit={(e) => { e.preventDefault(); addUser(); }}>
+      <input class="w-full bg-elevated border border-line rounded px-2 py-1.5 text-sm" placeholder="username" bind:value={newUser} autocomplete="off" />
+      <PasswordInput bind:value={newUserPass} placeholder="password (min 8)" />
+      <PasswordInput bind:value={newUserPass2} placeholder="confirm password" />
+      {#if newUserPass2 && newUserPass !== newUserPass2}<div class="text-[11px] text-red-500">Passwords don't match.</div>{/if}
+      <div class="flex justify-end gap-2 pt-1">
+        <button type="button" class="text-xs border border-line rounded px-3 py-1.5 text-muted hover:text-content" onclick={() => (showAdd = false)}>Cancel</button>
+        <button type="submit" class="text-xs bg-green-700 hover:bg-green-600 text-white rounded px-3 py-1.5 disabled:opacity-40"
+          disabled={s.busy || !addOk}>Add user</button>
+      </div>
+    </form>
+  </Modal>
+{/if}
+
+{#if showCode}
+  <Modal title="Enter enrollment code" onClose={() => (showCode = '')} max="max-w-sm">
+    <form onsubmit={(e) => { e.preventDefault(); submitCode(); }}>
+      <div class="text-xs text-muted mb-3">Enter the one-time code from an admin to add this device.</div>
+      <EnrollCodeInput bind:value={codeInput} disabled={s.busy} />
+      <div class="flex justify-end gap-2 pt-3">
+        <button type="button" class="text-xs border border-line rounded px-3 py-1.5 text-muted hover:text-content" onclick={() => (showCode = '')}>Cancel</button>
+        <button type="submit" class="text-xs bg-green-700 hover:bg-green-600 text-white rounded px-3 py-1.5 disabled:opacity-40"
+          disabled={s.busy || !codeOk}>Add device</button>
+      </div>
+    </form>
+  </Modal>
+{/if}

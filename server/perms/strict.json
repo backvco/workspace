@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Edit", "Write", "Read", "Glob", "Grep", "TodoWrite", "BashOutput",
+      "Bash(git:*)", "Bash(npm:*)", "Bash(npx:*)", "Bash(node:*)", "Bash(pnpm:*)",
+      "Bash(agent-report:*)", "Bash(ls:*)", "Bash(cat:*)", "Bash(grep:*)",
+      "Bash(rg:*)", "Bash(find:*)", "Bash(sed:*)", "Bash(awk:*)", "Bash(echo:*)",
+      "Bash(mkdir:*)", "Bash(cp:*)", "Bash(mv:*)", "Bash(test:*)", "Bash(gh:*)"
+    ],
+    "deny": [
+      "Bash(sudo:*)", "Bash(rm -rf:*)", "Bash(rm -fr:*)",
+      "Bash(git push --force:*)", "Bash(git push -f:*)", "Bash(git reset --hard:*)"
+    ]
+  }
+}

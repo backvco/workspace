@@ -1,0 +1,33 @@
+# dependencies
+node_modules
+server/node_modules
+
+# build / framework
+.svelte-kit/
+build/
+build.next/
+build.prev/
+dist/
+
+# runtime data (tab state, pasted images, clipboard)
+data/
+
+# env / secrets
+.env
+.dbenv
+
+# logs / misc
+*.log
+.DS_Store
+.deploy-rev
+
+# local planning notes + tooling scratch
+.plans/
+.playwright-mcp/
+iphone-*.png
+
+# local-only agent instructions (kept out of the public repo)
+CLAUDE.md
+
+# code-server upstream chosen by the installer
+.code-server-upstream

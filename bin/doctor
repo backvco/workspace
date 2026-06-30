@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# doctor - check the Workspace stack end to end and tell you exactly how to fix
+# whatever is broken. Run it anytime:  ./bin/doctor
+# Exits non-zero if any hard check fails.
+set -uo pipefail
+cd "$(dirname "$0")/.." 2>/dev/null || true
+
+C_OK=$'\033[32m'; C_BAD=$'\033[31m'; C_WARN=$'\033[33m'; C_B=$'\033[1m'; C_0=$'\033[0m'
+fails=0
+ok()   { printf '  %s[ok]%s   %s\n'   "$C_OK"  "$C_0" "$1"; }
+bad()  { printf '  %s[FAIL]%s %s\n'   "$C_BAD" "$C_0" "$1"; [ -n "${2:-}" ] && printf '         fix: %s\n' "$2"; fails=$((fails + 1)); }
+warn() { printf '  %s[warn]%s %s\n'   "$C_WARN" "$C_0" "$1"; [ -n "${2:-}" ] && printf '         %s\n' "$2"; }
+section(){ printf '\n%s%s%s\n' "$C_B" "$1" "$C_0"; }
+
+envget(){ sed -n "s/^$1=//p" .env 2>/dev/null | head -1; }
+listening(){ command -v ss >/dev/null 2>&1 && sudo ss -ltnH "sport = :$1" 2>/dev/null | grep -q .; }
+
+APIPORT="$(envget WORKSPACE_PORT)";   APIPORT="${APIPORT:-5301}"
+CLAUDEBIN="$(envget WORKSPACE_CLAUDE_BIN)"; CLAUDEBIN="${CLAUDEBIN:-claude}"
+PUBURL="$(envget WORKSPACE_PUBLIC_URL)"
+PUBHOST="$(envget WORKSPACE_PUBLIC_HOST)"
+
+printf '%sWorkspace doctor%s\n' "$C_B" "$C_0"
+
+section "Tools"
+for t in node git tmux; do command -v "$t" >/dev/null 2>&1 && ok "$t installed" || bad "$t not installed" "install $t (./bin/install-deps)"; done
+command -v "$CLAUDEBIN" >/dev/null 2>&1 && ok "agent CLI ($CLAUDEBIN) present" || bad "agent CLI ($CLAUDEBIN) not found" "npm install -g @anthropic-ai/claude-code, then run '$CLAUDEBIN' to log in"
+
+section "Dependencies"
+[ -d node_modules ] && ok "UI deps installed (node_modules)" || bad "UI deps missing" "npm install"
+[ -d server/node_modules/express ] && ok "API deps installed (server/node_modules)" || bad "API deps missing - this is why the API 502s" "(cd server && npm install)"
+[ -d build ] && ok "UI production build present" || warn "no production build yet" "npm run build (only needed for the prod/remote setup)"
+
+DBURL="$(envget WORKSPACE_DATABASE_URL)"; [ -z "$DBURL" ] && DBURL="${WORKSPACE_DATABASE_URL:-}"
+apihealthy(){ curl -fsS "http://127.0.0.1:$APIPORT/api/health" >/dev/null 2>&1; }
+
+section "Configuration (.env)"
+if [ -f .env ]; then ok ".env present"
+  if [ -n "$DBURL" ]; then ok "WORKSPACE_DATABASE_URL set"
+  else warn "WORKSPACE_DATABASE_URL not in .env" "ok if set via systemd/env; the Database check confirms"; fi
+  roots="$(envget WORKSPACE_PROJECT_ROOTS)"
+  if [ -n "$roots" ]; then ok "WORKSPACE_PROJECT_ROOTS set"
+    IFS=',' read -ra _r <<< "$roots"
+    for d in "${_r[@]}"; do d="$(echo "$d" | xargs)"; [ -z "$d" ] && continue
+      [ -d "$d" ] && ok "project root exists: $d" || bad "project root missing: $d" "mkdir -p '$d'"
+    done
+  else bad "WORKSPACE_PROJECT_ROOTS not set" "edit .env"; fi
+else bad ".env missing" "cp .env.example .env  (or re-run ./install.sh)"; fi
+
+section "Database"
+if [ -n "$DBURL" ] && command -v psql >/dev/null 2>&1; then
+  psql "$DBURL" -tAc 'select 1' >/dev/null 2>&1 && ok "Postgres reachable" || bad "cannot connect to Postgres" "check WORKSPACE_DATABASE_URL / that Postgres is running (docker ps)"
+elif apihealthy; then ok "Postgres reachable (the API is healthy, which needs it)"
+elif [ -n "$DBURL" ]; then warn "psql not installed - can't test the DB directly" "start the API; its health check needs the DB"
+else bad "no database URL and the API isn't up to confirm it" "set WORKSPACE_DATABASE_URL and start the API"
+fi
+
+section "Services"
+if listening "$APIPORT"; then ok "API listening on :$APIPORT"
+  if curl -fsS "http://127.0.0.1:$APIPORT/api/health" >/dev/null 2>&1; then ok "API /api/health responds"
+  else bad "API up but /api/health failing" "journalctl -u workspace-api -n 40 --no-pager"; fi
+else bad "API not listening on :$APIPORT" "node server/index.js   (or sudo systemctl restart workspace-api)"; fi
+
+if listening 3000; then ok "UI (production build) on :3000"
+elif listening 5300; then ok "UI (vite dev) on :5300"
+else bad "UI not listening on :3000 (prod) or :5300 (dev)" "local: npm run dev   |   prod: PORT=3000 node build  (or ./bin/setup-service)"; fi
+
+if [ -n "$PUBURL" ] || [ -n "$PUBHOST" ]; then
+  section "Public HTTPS"
+  url="${PUBURL:-https://$PUBHOST}"
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl is-active --quiet caddy 2>/dev/null && ok "Caddy service active" || warn "Caddy service not active" "sudo systemctl status caddy"
+  fi
+  code="$(curl -sS --max-time 8 -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || echo 000)"
+  case "$code" in
+    000) bad "no HTTPS handshake at $url (cert not issued or port unreachable)" "./bin/setup-tls <domain> --dns <provider>; journalctl -u caddy -n 50 --no-pager" ;;
+    502|503) bad "$url cert OK but backend $code (app not running)" "start the UI/API (see Services above)" ;;
+    5[0-9][0-9]) bad "$url returned HTTP $code (the app is erroring)" "journalctl -u workspace-ui -n 40 --no-pager  (often a missing ORIGIN - re-run ./bin/setup-service)" ;;
+    200|301|302|401|403) ok "$url is live (HTTP $code) with a valid certificate" ;;
+    *) warn "$url returned HTTP $code" "" ;;
+  esac
+fi
+
+if [ -n "$(envget WORKSPACE_CODE_SERVER_URL)" ]; then
+  section "Embedded VS Code (code-server)"
+  if systemctl is-active --quiet workspace-code-server 2>/dev/null || listening 8080; then
+    ok "code-server is running (localhost only)"
+  else
+    bad "code-server not running" "sudo systemctl restart workspace-code-server (journalctl -u workspace-code-server -n 40)"
+  fi
+  warn "/code is gated by app auth" "it is only protected when auth is ENABLED in Settings"
+fi
+
+# Passkeys (Face ID / Touch ID / Windows Hello) bind to the host (rpID) and need
+# HTTPS off localhost. Flag the two things that silently break enrollment.
+section "Passkeys (WebAuthn, optional)"
+if [ -z "$PUBHOST" ] && [ -z "$PUBURL" ]; then
+  warn "no public host configured" "passkeys work on localhost; for remote, set WORKSPACE_PUBLIC_HOST + HTTPS before enrolling"
+else
+  if [ -n "$PUBHOST" ]; then ok "rpID = $PUBHOST (keep WORKSPACE_PUBLIC_HOST stable once passkeys are enrolled)"
+  else warn "WORKSPACE_PUBLIC_HOST not set" "passkeys bind to whatever host you browse to; set it to your domain before enrolling"; fi
+  case "${PUBURL:-https://$PUBHOST}" in
+    https://*) ok "served over HTTPS - passkeys can enroll" ;;
+    *) warn "public URL is not HTTPS" "passkeys require HTTPS (except on localhost) - finish the TLS step" ;;
+  esac
+fi
+
+section "Backups"
+bdir="$(envget WORKSPACE_BACKUP_DIR)"; [ -z "$bdir" ] && bdir="data/backups"
+bcnt=$(ls "$bdir"/workspace-*.dump 2>/dev/null | wc -l | tr -d ' ')
+if [ "${bcnt:-0}" -gt 0 ]; then
+  newest="$(ls -t "$bdir"/workspace-*.dump 2>/dev/null | head -1)"
+  ok "$bcnt database backup(s) in $bdir, newest $(basename "$newest")"
+else
+  warn "no database backups yet in $bdir" "create one or set a schedule in Settings -> Backups"
+fi
+
+section "Result"
+if [ "$fails" -eq 0 ]; then printf '%sEverything looks healthy.%s\n' "$C_OK" "$C_0"; exit 0
+else printf '%s%d issue(s) found - see the "fix:" lines above.%s\n' "$C_BAD" "$fails" "$C_0"; exit 1; fi

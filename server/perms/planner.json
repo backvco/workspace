@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Read", "Glob", "Grep",
+      "WebSearch", "WebFetch",
+      "Bash(git log:*)", "Bash(git diff:*)", "Bash(git show:*)", "Bash(git status:*)", "Bash(git branch:*)",
+      "Bash(ls:*)", "Bash(cat:*)", "Bash(rg:*)", "Bash(find:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)",
+      "Bash(claude:*)",
+      "Bash(plan-emit:*)",
+      "mcp__tickets__propose_tickets", "mcp__tickets__list_tickets", "mcp__tickets__get_ticket", "mcp__tickets__create_tickets"
+    ],
+    "deny": [
+      "Write", "Edit", "Bash(rm:*)", "Bash(git push:*)", "Bash(git commit:*)", "Bash(git checkout:*)", "Bash(sudo:*)"
+    ]
+  }
+}

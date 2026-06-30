@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# print-proxy <nginx|caddy> <domain> [ui_port] [allow_cidrs] - print a reverse-proxy
+# config that routes /api + /ws to the API (:5301) and everything else to the
+# production UI. Pass allow_cidrs (comma/space-separated) to restrict access to
+# those source IPs/subnets; the Let's Encrypt challenge path stays open.
+set -euo pipefail
+
+KIND="${1:?usage: bin/print-proxy <nginx|caddy> <domain> [ui_port] [allow_cidrs]}"
+DOMAIN="${2:?domain required}"
+UI="${3:-3000}"
+ALLOW="${4:-}"
+API="${WORKSPACE_PORT:-5301}"
+
+# Build the per-proxy allow snippets when an allowlist is given.
+caddy_allow=""; nginx_allow=""
+if [ -n "$ALLOW" ]; then
+  caddy_allow="    @blocked not remote_ip $(echo "$ALLOW" | tr ',' ' ')"$'\n    respond @blocked "Forbidden" 403\n'
+  for c in $(echo "$ALLOW" | tr ',' ' '); do nginx_allow="$nginx_allow    allow $c;"$'\n'; done
+  nginx_allow="$nginx_allow    deny all;"$'\n'
+fi
+
+case "$KIND" in
+  caddy)
+    cat <<EOF
+$DOMAIN {
+$caddy_allow    @api path /api/* /ws/*
+    reverse_proxy @api localhost:$API
+    reverse_proxy localhost:$UI
+}
+EOF
+    ;;
+  nginx)
+    cat <<EOF
+server {
+    listen 80;
+    server_name $DOMAIN;
+    # Enable HTTPS afterwards:  sudo certbot --nginx -d $DOMAIN
+
+    # Keep the ACME challenge reachable from anywhere (cert issuance/renewal):
+    location /.well-known/acme-challenge/ { allow all; root /var/www/html; }
+
+$nginx_allow    # Terminal websocket (needs the Upgrade headers)
+    location /ws/ {
+        proxy_pass http://127.0.0.1:$API;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_read_timeout 86400;
+    }
+    location /api/ {
+        proxy_pass http://127.0.0.1:$API;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+    location / {
+        proxy_pass http://127.0.0.1:$UI;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+EOF
+    ;;
+  *) echo "unknown proxy type: $KIND (use 'nginx' or 'caddy')"; exit 1 ;;
+esac

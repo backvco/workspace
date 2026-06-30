@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Workspace ai">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#161b22"/>
+      <stop offset="1" stop-color="#0d1117"/>
+    </linearGradient>
+  </defs>
+  <!-- full-bleed background: the OS applies the rounded/circular mask -->
+  <rect width="512" height="512" fill="url(#bg)"/>
+  <!-- foreground scaled into the maskable safe zone (~62%, centered) -->
+  <g transform="translate(256 256) scale(0.6) translate(-262 -244)"
+     font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-weight="800">
+    <!-- W -->
+    <text x="176" y="350" font-size="300" fill="#e6edf3" text-anchor="middle" letter-spacing="-10">W</text>
+    <!-- small "ai" in place of the period -->
+    <text x="326" y="350" font-size="118" fill="#2f81f7" text-anchor="start" letter-spacing="-3">ai</text>
+  </g>
+</svg>

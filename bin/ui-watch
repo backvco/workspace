@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Auto-deploy watcher. Compares master HEAD against the commit that's actually
+# DEPLOYED (recorded in .deploy-rev by bin/deploy-ui) — not against whatever HEAD
+# happened to be when this watcher started. So if the running build is behind at
+# startup (e.g. merges landed before the watcher came up), it catches up.
+#
+# When HEAD differs from the deployed rev, it waits for a debounce window (so a
+# burst of merges coalesces into one build), then deploys. A build that FAILS
+# does not advance .deploy-rev; the failed commit is remembered and skipped until
+# a new commit lands, so it won't rebuild-loop on a broken commit.
+# Pause with:  sudo systemctl stop workspace-ui-deploy
+set -uo pipefail
+cd "$(dirname "$0")/.." || exit 1   # repo root, wherever this checkout lives
+HEAD_REV()     { git rev-parse HEAD 2>/dev/null || echo none; }
+DEPLOYED_REV() { cat .deploy-rev 2>/dev/null || echo none; }
+DEBOUNCE=90
+failed=none
+echo "[ui-watch] watching master; deployed=$(DEPLOYED_REV)"
+while true; do
+  head=$(HEAD_REV)
+  if [ "$head" != "$(DEPLOYED_REV)" ] && [ "$head" != "$failed" ]; then
+    echo "[ui-watch] change detected (HEAD $head != deployed $(DEPLOYED_REV)); debouncing ${DEBOUNCE}s"
+    # Wait until HEAD stops moving for $DEBOUNCE seconds (coalesce merge bursts).
+    while :; do
+      sleep "$DEBOUNCE"
+      n=$(HEAD_REV)
+      [ "$n" = "$head" ] && break
+      head=$n
+    done
+    echo "[ui-watch] deploying $head"
+    if bin/deploy-ui --auto; then
+      failed=none
+    else
+      failed=$head
+      echo "[ui-watch] build failed at $head; waiting for a new commit"
+    fi
+  fi
+  sleep 15
+done
