@@ -54,7 +54,7 @@
       const saved = localStorage.getItem('railOpen');
       railOpen = saved !== null ? saved !== '0' : !narrow;
     } catch { railOpen = !narrow; }
-    isPwa = window.matchMedia('(display-mode: standalone)').matches || !!(/** @type {any} */ (navigator).standalone);
+    isPwa = window.matchMedia('(display-mode: standalone)').matches || !!(/** @type {Navigator & { standalone?: boolean }} */ (navigator).standalone);
     initTheme();
     // Check auth before loading project data (API calls 401 while gated).
     api.authStatus()
