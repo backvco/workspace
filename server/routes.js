@@ -34,11 +34,12 @@ import {
 import { listRoots } from './projects.js';
 import {
   authMiddleware, getAuthEnabled, setAuthEnabled, sessionUser,
-  countUsers, listUsers, createUser, deleteUser, findUser, verifyLogin,
+  countUsers, listUsers, createUser, deleteUser, updateUser, setUserPassword, findUser, verifyLogin,
   signToken, verifyToken, setSessionCookie, clearSessionCookie, originAllowed
 } from './auth.js';
 import {
   getLoginPolicy, setLoginPolicy, passkeyLoginAllowed, userHasPasskey, STEPUP_TTL_MS,
+  passkeyAuthed, createEnrollCode, redeemEnrollCode,
   listCredentialsMeta, removeCredential, resetCredentials,
   registerOptions, registerVerify, loginOptions, loginVerify
 } from './passkeys.js';
@@ -89,7 +90,7 @@ export function buildRouter(cfg) {
       const out = await createUser(cfg, req.body?.username, req.body?.password);
       if (out.error) return res.status(400).json(out);
       if (!cfg.sessionKey) return res.json({ ok: true, user: out, note: 'set WORKSPACE_SESSION_KEY to enable login sessions' });
-      setSessionCookie(req, res, signToken(cfg, { uid: out.id, name: out.username }));
+      setSessionCookie(req, res, signToken(cfg, { uid: out.id, name: out.username, amr: 'pwd' }));
       res.json({ ok: true, user: out });
     } catch (e) { (console.error('server error:', e?.message || e), res.status(500).json({ error: 'internal error' })); }
   });
@@ -114,10 +115,11 @@ export function buildRouter(cfg) {
         const stepToken = signToken(cfg, { uid: user.id, name: user.username, stp: 'pk' }, STEPUP_TTL_MS);
         return res.json({ ok: true, step: 'passkey', stepToken });
       }
-      setSessionCookie(req, res, signToken(cfg, { uid: user.id, name: user.username }));
-      // Nudge: policy wants a passkey but this user hasn't enrolled one yet.
+      setSessionCookie(req, res, signToken(cfg, { uid: user.id, name: user.username, amr: 'pwd' }));
+      // Offer enrollment: this user has no passkey yet (first passkey is always
+      // allowed from a password session). mustEnroll = the policy actively wants one.
       const mustEnroll = !hasPk && (policy === 'passkey' || policy === 'both');
-      res.json({ ok: true, user: { id: user.id, username: user.username }, mustEnroll });
+      res.json({ ok: true, user: { id: user.id, username: user.username }, mustEnroll, firstPasskey: !hasPk });
     } catch (e) { (console.error('server error:', e?.message || e), res.status(500).json({ error: 'internal error' })); }
   });
 
@@ -133,6 +135,17 @@ export function buildRouter(cfg) {
     if ((await countUsers(cfg)) <= 1) return res.status(400).json({ error: 'cannot delete the last user' });
     res.json({ ok: await deleteUser(cfg, req.params.id) });
   });
+  r.patch('/auth/users/:id', authj, async (req, res) => {
+    const out = await updateUser(cfg, req.params.id, { name: req.body?.name, email: req.body?.email });
+    res.status(out.error ? 400 : 200).json(out);
+  });
+  r.post('/auth/users/:id/password', authj, async (req, res) => {
+    const out = await setUserPassword(cfg, req.params.id, req.body?.password);
+    res.status(out.error ? 400 : 200).json(out);
+  });
+  // A specific user's passkeys (admin master-detail view).
+  r.get('/auth/users/:id/passkeys', async (req, res) => res.json({ credentials: await listCredentialsMeta(cfg, req.params.id) }));
+  r.delete('/auth/users/:id/passkeys/:credId', async (req, res) => res.json(await removeCredential(cfg, req.params.id, req.params.credId)));
   r.post('/auth/enabled', authj, async (req, res) => {
     const out = await setAuthEnabled(cfg, !!req.body?.enabled);
     res.status(out.error ? 400 : 200).json(out);
@@ -148,6 +161,12 @@ export function buildRouter(cfg) {
   // Admin: clear another user's passkeys (lost device). Behind the auth gate.
   r.post('/auth/passkey/reset/:id', async (req, res) => {
     const out = await resetCredentials(cfg, req.params.id);
+    res.status(out.error ? 400 : 200).json(out);
+  });
+  // Admin: issue a one-time enrollment code so a user who's lost their devices can
+  // add a new passkey from a password session. Behind the auth gate.
+  r.post('/auth/passkey/enroll-code/:id', async (req, res) => {
+    const out = await createEnrollCode(cfg, req.params.id);
     res.status(out.error ? 400 : 200).json(out);
   });
   r.get('/auth/passkey/credentials', async (req, res) => {
@@ -172,6 +191,18 @@ export function buildRouter(cfg) {
     try {
       const u = sessionUser(cfg, req);
       if (!u) return res.status(401).json({ error: 'sign in first' });
+      // Enrollment gate. The FIRST passkey is allowed from a password session
+      // (nothing to protect yet). Once the user has a passkey, treat the account
+      // as public-internet: a NEW device must be added from a passkey-authenticated
+      // session (proof of possession, incl. the QR cross-device flow) OR with a
+      // one-time admin enrollment code — a stolen password alone can't add one.
+      if (await userHasPasskey(cfg, u.uid) && !passkeyAuthed(u.amr)) {
+        const ok = await redeemEnrollCode(cfg, u.uid, req.body?.enrollCode);
+        if (!ok) return res.status(403).json({
+          code: 'enroll_blocked',
+          error: 'To add another device, sign in with an existing passkey, or enter a one-time enrollment code from an admin.',
+        });
+      }
       const out = await registerVerify(cfg, req, u.uid, req.body || {});
       res.status(out.error ? 400 : 200).json(out);
     } catch (e) { (console.error('server error:', e?.message || e), res.status(500).json({ error: 'internal error' })); }
@@ -192,12 +223,14 @@ export function buildRouter(cfg) {
       if (out.error) return res.status(401).json(out);
       // Under 2FA, a passkey alone is NOT enough — require the step-up token issued
       // by the password step, and confirm it names the same user as the assertion.
+      let amr = 'passkey';
       if (policy === 'both') {
         const tok = verifyToken(cfg, req.body?.stepToken);
         if (!tok || tok.stp !== 'pk' || tok.uid !== out.user.id)
           return res.status(401).json({ error: 'enter your password first' });
+        amr = 'pwd+passkey';
       }
-      setSessionCookie(req, res, signToken(cfg, { uid: out.user.id, name: out.user.username }));
+      setSessionCookie(req, res, signToken(cfg, { uid: out.user.id, name: out.user.username, amr }));
       res.json({ ok: true, user: out.user });
     } catch (e) { (console.error('server error:', e?.message || e), res.status(500).json({ error: 'internal error' })); }
   });

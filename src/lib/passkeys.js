@@ -26,9 +26,11 @@ export function deviceLabel() {
   return 'Passkey';
 }
 
-// Enroll this device for the signed-in user. Returns { ok } or { error }.
-/** @param {string} name */
-export async function enrollPasskey(name) {
+// Enroll this device for the signed-in user. `enrollCode` is the optional one-time
+// admin code required to add a NEW device from a password-only session once the
+// user already has a passkey. Returns { ok } or { error } (with .code on a block).
+/** @param {string} name @param {string} [enrollCode] */
+export async function enrollPasskey(name, enrollCode) {
   const opt = await api.passkeyRegisterOptions();
   if (opt.error) return { error: opt.error };
   let response;
@@ -37,7 +39,7 @@ export async function enrollPasskey(name) {
   } catch (e) {
     return { error: friendly(e) };
   }
-  return api.passkeyRegisterVerify({ challengeId: opt.challengeId, response, name });
+  return api.passkeyRegisterVerify({ challengeId: opt.challengeId, response, name, enrollCode });
 }
 
 // Sign in with a passkey (no username needed — discoverable credential). For the

@@ -38,6 +38,14 @@ export const api = {
   authAddUser: (username, password) => jsonSafe('/api/auth/users', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username, password }) }),
   /** @param {string} id */
   authRemoveUser: (id) => jsonSafe(`/api/auth/users/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  /** @param {string} id @param {{name?:string,email?:string}} profile */
+  authUpdateUser: (id, profile) => jsonSafe(`/api/auth/users/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(profile) }),
+  /** @param {string} id @param {string} password */
+  authSetPassword: (id, password) => jsonSafe(`/api/auth/users/${encodeURIComponent(id)}/password`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password }) }),
+  /** @param {string} id */
+  userPasskeys: (id) => json(`/api/auth/users/${encodeURIComponent(id)}/passkeys`),
+  /** @param {string} id @param {string} credId */
+  userRemovePasskey: (id, credId) => jsonSafe(`/api/auth/users/${encodeURIComponent(id)}/passkeys/${encodeURIComponent(credId)}`, { method: 'DELETE' }),
   /** @param {boolean} enabled */
   authSetEnabled: (enabled) => jsonSafe('/api/auth/enabled', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled }) }),
 
@@ -46,6 +54,8 @@ export const api = {
   passkeySetPolicy: (policy) => jsonSafe('/api/auth/passkey/policy', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ policy }) }),
   /** @param {string} id */
   passkeyResetUser: (id) => jsonSafe(`/api/auth/passkey/reset/${encodeURIComponent(id)}`, { method: 'POST' }),
+  /** @param {string} id */
+  passkeyEnrollCode: (id) => jsonSafe(`/api/auth/passkey/enroll-code/${encodeURIComponent(id)}`, { method: 'POST' }),
   passkeyCredentials: () => json('/api/auth/passkey/credentials'),
   /** @param {string} id */
   passkeyRemove: (id) => jsonSafe(`/api/auth/passkey/credentials/${encodeURIComponent(id)}`, { method: 'DELETE' }),

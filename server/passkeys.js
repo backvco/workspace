@@ -48,6 +48,37 @@ export async function userHasPasskey(cfg, uid) {
   const u = await getUserById(cfg, uid);
   return (u?.credentials || []).length > 0;
 }
+// Did this session authenticate with a passkey? (session token's `amr` claim:
+// 'pwd' | 'passkey' | 'pwd+passkey'.) Proof-of-possession of an enrolled device.
+export const passkeyAuthed = (amr) => typeof amr === 'string' && amr.split('+').includes('passkey');
+
+// --- admin one-time enrollment codes (lost-all-devices fallback) ---
+const ENROLL_CODE_TTL_MS = 15 * 60 * 1000;
+function hashCode(cfg, code) {
+  return crypto.createHmac('sha256', cfg.sessionKey || 'x').update(String(code)).digest('hex');
+}
+// Generate (and store the hash of) a one-time code for a user; returns the plaintext
+// once. A fresh code overwrites any previous unused one for that user.
+export async function createEnrollCode(cfg, userId) {
+  const u = await getUserById(cfg, userId);
+  if (!u) return { error: 'user not found' };
+  const code = crypto.randomBytes(5).toString('hex').toUpperCase(); // 10 hex chars
+  await q(cfg, `INSERT INTO enroll_codes (user_id, code_hash, created_at) VALUES ($1,$2, now())
+                ON CONFLICT (user_id) DO UPDATE SET code_hash = $2, created_at = now()`,
+    [userId, hashCode(cfg, code)]);
+  return { code, expiresInMin: ENROLL_CODE_TTL_MS / 60000 };
+}
+// Atomically consume a user's code: true only if it matches and is unexpired.
+export async function redeemEnrollCode(cfg, userId, code) {
+  if (!code) return false;
+  const rows = await q(cfg, 'DELETE FROM enroll_codes WHERE user_id = $1 RETURNING code_hash, created_at', [userId]);
+  const row = rows[0];
+  if (!row) return false;
+  if (Date.now() - new Date(row.created_at).getTime() > ENROLL_CODE_TTL_MS) return false;
+  const a = Buffer.from(row.code_hash);
+  const b = Buffer.from(hashCode(cfg, code));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
 
 // --- relying-party identity (derived from WORKSPACE_PUBLIC_HOST, request fallback) ---
 // rpID is a bare hostname; origin is the full https:// URL the browser sees. A

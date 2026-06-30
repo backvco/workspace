@@ -84,4 +84,9 @@ export async function initSchema(cfg) {
   await q(cfg, `CREATE TABLE IF NOT EXISTS webauthn_challenges (
     id text PRIMARY KEY, user_id text, kind text NOT NULL,
     challenge text NOT NULL, created_at timestamptz DEFAULT now())`);
+  // Admin-issued one-time passkey enrollment codes. Authorize enrolling a NEW
+  // device from a password-only session once a user already has a passkey (the
+  // "lost all my devices" fallback). Single-use, short TTL (see passkeys.js).
+  await q(cfg, `CREATE TABLE IF NOT EXISTS enroll_codes (
+    user_id text PRIMARY KEY, code_hash text NOT NULL, created_at timestamptz DEFAULT now())`);
 }

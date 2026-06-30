@@ -114,7 +114,7 @@ export async function countUsers(cfg) {
 }
 export async function listUsers(cfg) {
   const rows = await q(cfg, 'SELECT data FROM users ORDER BY created_at');
-  return rows.map((r) => ({ id: r.data.id, username: r.data.username, createdAt: r.data.createdAt, passkeyCount: (r.data.credentials || []).length }));
+  return rows.map((r) => ({ id: r.data.id, username: r.data.username, name: r.data.name || '', email: r.data.email || '', createdAt: r.data.createdAt, passkeyCount: (r.data.credentials || []).length }));
 }
 export async function findUser(cfg, username) {
   const rows = await q(cfg, 'SELECT data FROM users WHERE lower(data->>\'username\') = lower($1)', [String(username || '')]);
@@ -132,6 +132,27 @@ export async function createUser(cfg, username, password) {
 export async function deleteUser(cfg, id) {
   await q(cfg, 'DELETE FROM users WHERE id = $1', [id]);
   return true;
+}
+// Editable profile fields (display name, email). Stored only — no behaviour yet.
+export async function updateUser(cfg, id, { name, email } = {}) {
+  const rows = await q(cfg, 'SELECT data FROM users WHERE id = $1', [String(id)]);
+  const user = rows[0]?.data;
+  if (!user) return { error: 'user not found' };
+  if (name !== undefined) user.name = String(name).slice(0, 200);
+  if (email !== undefined) user.email = String(email).slice(0, 320);
+  await q(cfg, 'UPDATE users SET data = $2::jsonb WHERE id = $1', [user.id, JSON.stringify(user)]);
+  return { id: user.id, username: user.username, name: user.name || '', email: user.email || '' };
+}
+// Admin set-password: replaces a user's password without the old one (any signed-in
+// user can manage accounts in this app — same model as add/remove user).
+export async function setUserPassword(cfg, id, password) {
+  if (!password || String(password).length < 6) return { error: 'password must be at least 6 characters' };
+  const rows = await q(cfg, 'SELECT data FROM users WHERE id = $1', [String(id)]);
+  const user = rows[0]?.data;
+  if (!user) return { error: 'user not found' };
+  user.passwordHash = hashPassword(password);
+  await q(cfg, 'UPDATE users SET data = $2::jsonb WHERE id = $1', [user.id, JSON.stringify(user)]);
+  return { ok: true };
 }
 
 // --- settings (auth.enabled), cached so the ws upgrade + middleware are cheap ---
