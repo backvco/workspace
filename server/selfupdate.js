@@ -94,6 +94,20 @@ function deployDetached() {
   child.unref();
 }
 
+// Restart a workspace-* systemd unit, detached. A short sleep lets the HTTP
+// response for the triggering request finish flushing before systemd kills
+// the process — matters when the unit being restarted is our own (the API).
+function restartServiceDetached(unit) {
+  const fd = openSync(DEPLOY_LOG, 'a');
+  const child = spawn('bash', ['-c', `sleep 0.3 && sudo systemctl restart ${unit}`], {
+    detached: true, stdio: ['ignore', fd, fd],
+  });
+  child.unref();
+}
+
+export function restartApi() { restartServiceDetached('workspace-api'); }
+export function restartUi() { restartServiceDetached('workspace-ui'); }
+
 /**
  * Bring the checkout to origin/<branch> then kick a detached deploy.
  * - normal: `git pull --ff-only` — refuses (returns the error) if the checkout
@@ -118,6 +132,9 @@ export async function runUpdate(force = false) {
     }
     const head = short((await git(['rev-parse', 'HEAD'])).out);
     deployDetached();
+    // server/** may have changed too; restart the API unconditionally rather
+    // than diffing changed paths, so a pull never leaves it serving stale code.
+    restartApi();
     return { ok: true, deploying: true, head };
   } finally {
     updating = false;

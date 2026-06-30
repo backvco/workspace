@@ -30,6 +30,8 @@ export const api = {
   version: () => json('/api/version'),
   /** @param {boolean} [force] force=reset --hard to origin (for a diverged checkout) */
   selfUpdate: (force = false) => json(`/api/update${force ? '?force=1' : ''}`, { method: 'POST' }),
+  restartApi: () => json('/api/restart-api', { method: 'POST' }),
+  restartUi: () => json('/api/restart-ui', { method: 'POST' }),
 
   // --- clipboard explorer (pasted images, per workspace) ---
   clipboardList: () => json('/api/clipboard'),

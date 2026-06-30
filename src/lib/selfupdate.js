@@ -18,8 +18,8 @@ export async function runSelfUpdate(force, onPhase) {
   const head = res.head;
   onPhase('deploying', 'Building & restarting…');
   // The running page is still the OLD build; poll until the new commit serves,
-  // then reload. The API stays up across the workspace-ui restart, so polling
-  // is uninterrupted.
+  // then reload. The API also restarts as part of this (server/** may have
+  // changed), so a version() call can transiently fail mid-restart — retried below.
   const started = Date.now();
   const tick = async () => {
     /** @type {any} */ let v = null;

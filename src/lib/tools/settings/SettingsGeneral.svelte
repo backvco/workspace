@@ -1,6 +1,7 @@
 <script>
   // Read-only server configuration + the running build / self-update controls.
   import { s } from './store.svelte.js';
+  import { api } from '$lib/api.js';
   import { runSelfUpdate } from '$lib/selfupdate.js';
 
   let phase = $state(/** @type {'idle'|'pulling'|'deploying'|'done'|'error'} */ ('idle'));
@@ -11,6 +12,32 @@
   async function update(force = false) {
     if (force && !confirm('Force update: reset this checkout to origin and discard any local commits/changes, then redeploy. Continue?')) return;
     await runSelfUpdate(force, (p, m) => { phase = p; message = m; });
+  }
+
+  let apiRestarting = $state(false);
+  let uiRestarting = $state(false);
+
+  async function restartApi() {
+    if (!confirm('Restart the API service now? API calls will briefly fail while it restarts.')) return;
+    apiRestarting = true;
+    try {
+      await api.restartApi();
+      const started = Date.now();
+      const tick = async () => {
+        try { await api.version(); apiRestarting = false; return; }
+        catch { /* still restarting */ }
+        if (Date.now() - started > 30_000) { apiRestarting = false; return; }
+        setTimeout(tick, 1500);
+      };
+      setTimeout(tick, 1000);
+    } catch { apiRestarting = false; }
+  }
+
+  async function restartUi() {
+    if (!confirm('Restart the UI service now? The page will reload once it is back.')) return;
+    uiRestarting = true;
+    try { await api.restartUi(); } catch { /* ignore — we reload regardless */ }
+    setTimeout(() => location.reload(), 2500);
   }
 </script>
 
@@ -71,7 +98,19 @@
         {busy && !v.canFastForward ? (phase === 'pulling' ? 'Resetting…' : 'Deploying…') : 'Force update (reset to origin)'}
       </button>
     </div>
-    <p class="text-xs text-muted mt-2">Pulls from origin (or hard-resets, for Force) then rebuilds and restarts the UI. Server-side changes still need an API restart.</p>
+    <p class="text-xs text-muted mt-2">Pulls from origin (or hard-resets, for Force), rebuilds + restarts the UI, and restarts the API.</p>
+
+    <div class="flex flex-wrap gap-2 mt-3 pt-3 border-t border-line">
+      <button class="text-xs rounded px-3 py-1.5 border border-line hover:bg-bg/50 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+        disabled={apiRestarting} onclick={restartApi}>
+        {apiRestarting ? 'Restarting API…' : 'Restart API'}
+      </button>
+      <button class="text-xs rounded px-3 py-1.5 border border-line hover:bg-bg/50 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+        disabled={uiRestarting} onclick={restartUi}>
+        {uiRestarting ? 'Restarting UI…' : 'Restart UI'}
+      </button>
+    </div>
+    <p class="text-xs text-muted mt-2">Manual restarts of the running services — no pull, just a process bounce. Use after server/** changes that didn't go through an update, or to recover a hung service.</p>
   {:else}
     <div class="text-xs text-muted">Version info unavailable.</div>
   {/if}

@@ -14,7 +14,7 @@ import {
 import { list as fsList, read as fsRead, write as fsWrite, ensureWithin } from './fs.js';
 import { listClipboard, clipboardFilePath, pruneClipboard } from './clipboard.js';
 import { getStats } from './stats.js';
-import { updateStatus, runUpdate } from './selfupdate.js';
+import { updateStatus, runUpdate, restartApi, restartUi } from './selfupdate.js';
 import {
   listTargets, createTask, startTask, listAgents, stopAgent, removeTask, recordEvent,
   approveAgent, replyAgent, acceptAgent, listEvents, setLinks, adviseTickets, enhanceTicketDraft,
@@ -467,6 +467,14 @@ export function buildRouter(cfg) {
   r.post('/update', async (req, res) => {
     try { res.json(await runUpdate(String(req.query.force || '') === '1')); }
     catch (e) { (console.error('update error:', e?.message || e), res.status(500).json({ error: 'internal error' })); }
+  });
+  r.post('/restart-api', adminRl, async (_req, res) => {
+    try { restartApi(); res.json({ ok: true }); }
+    catch (e) { (console.error('restart-api error:', e?.message || e), res.status(500).json({ error: 'internal error' })); }
+  });
+  r.post('/restart-ui', adminRl, async (_req, res) => {
+    try { restartUi(); res.json({ ok: true }); }
+    catch (e) { (console.error('restart-ui error:', e?.message || e), res.status(500).json({ error: 'internal error' })); }
   });
 
   // --- Files: filesystem browse/read/write (guarded to roots) ---
