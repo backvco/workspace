@@ -4,6 +4,7 @@
 // orchestrates the privileged bash helpers in bin/. No external dependencies.
 import { createInterface } from 'node:readline';
 import { spawnSync } from 'node:child_process';
+import net from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { resolveNs } from 'node:dns/promises';
 import { ReadStream } from 'node:tty';
@@ -110,6 +111,40 @@ function copyBlock(heading, cmd) {
 // instance), recorded in .code-server-upstream. Falls back to the historical default.
 const codeUpstream = () =>
   (existsSync('.code-server-upstream') ? readFileSync('.code-server-upstream', 'utf8').trim() : '') || '127.0.0.1:8080';
+
+// Bind-test a port on 127.0.0.1 (where the app binds). Resolves:
+//   'ok'        - free + bindable
+//   'in-use'    - something is already listening (EADDRINUSE)
+//   'protected' - privileged/system-protected; needs root (EACCES, e.g. <1024)
+//   'bad'       - invalid / otherwise unusable
+function portStatus(port) {
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.once('error', (e) => resolve(e.code === 'EADDRINUSE' ? 'in-use' : e.code === 'EACCES' ? 'protected' : 'bad'));
+    srv.once('listening', () => srv.close(() => resolve('ok')));
+    try { srv.listen(port, '127.0.0.1'); } catch { resolve('bad'); }
+  });
+}
+// First free+usable port at/after `start` (to suggest a conflict-free default).
+async function firstFree(start) {
+  for (let p = start; p < start + 50; p++) if ((await portStatus(p)) === 'ok') return p;
+  return start;
+}
+// Suggest a free default, let the user override, and validate their choice is
+// actually free + usable - re-prompting with the reason until it is.
+async function pickPort(label, preferred) {
+  const def = await firstFree(preferred);
+  if (def !== preferred) console.log(`${C.dim}  (default ${preferred} is busy; suggesting ${def})${C.off}`);
+  for (;;) {
+    const port = Number((await ask(`${label} port [${def}]: `, String(def))).trim());
+    if (!Number.isInteger(port) || port < 1 || port > 65535) { console.log('  Enter a port number between 1 and 65535.'); continue; }
+    const st = await portStatus(port);
+    if (st === 'ok') return String(port);
+    console.log(st === 'in-use' ? `  Port ${port} is already in use - choose another.`
+      : st === 'protected' ? `  Port ${port} is privileged/protected (needs root) - choose a port >= 1024.`
+      : `  Port ${port} isn't usable - choose another.`);
+  }
+}
 
 // Replace KEY= line (commented or not) in .env, or append it.
 function setEnv(key, val) {
@@ -220,6 +255,15 @@ async function main() {
     run('node', ['bin/set-backup.mjs', sched]);
   }
 
+  // --- Ports --- (the app binds these on 127.0.0.1; the reverse proxy sits in front).
+  // We suggest a free default, then validate the operator's choice is free + usable.
+  say('Ports (bound on 127.0.0.1; your reverse proxy / dev server sits in front)');
+  const apiPort = await pickPort('API (workspace-api)', 5301);
+  const uiPort = await pickPort('UI production build (workspace-ui)', 3000);
+  process.env.WORKSPACE_PORT = apiPort;   // so child scripts (setup-tls) use it too
+  setEnv('WORKSPACE_PORT', apiPort);
+  setEnv('WORKSPACE_UI_PORT', uiPort);    // record for doctor + setup-service
+
   // --- access: local vs remote ---
   let domain = '', svc = false, httpsPort = '443', tlsOk = true, tlsKind = '', tlsProv = '', authOn = false;
   const access = await menu('How will you reach Workspace?', [
@@ -308,9 +352,9 @@ async function main() {
               run('./bin/dns-credentials', [prov, domain]);
             }
           }
-          tlsOk = run('./bin/setup-tls', [domain, '3000', '--dns', prov, ...extra]);
+          tlsOk = run('./bin/setup-tls', [domain, uiPort, '--dns', prov, ...extra]);
         } else {
-          tlsOk = run('./bin/setup-tls', [domain, '3000', ...extra]);
+          tlsOk = run('./bin/setup-tls', [domain, uiPort, ...extra]);
         }
       }
     } else if (tls === 'self' || tls === 'nginx') {
@@ -320,20 +364,20 @@ async function main() {
       say('Building the production UI...'); run('npm', ['run', 'build']);
       if (tls === 'nginx') {
         say(`Add this nginx server block, then run: sudo certbot --nginx -d ${domain || '<your-domain>'}`);
-        run('./bin/print-proxy', ['nginx', domain || 'your.domain', '3000', '']);
+        run('./bin/print-proxy', ['nginx', domain || 'your.domain', uiPort, '']);
       } else {
         say('Run your own reverse proxy in front of these (terminate TLS there):');
-        console.log('  /api/* and /ws/*  ->  127.0.0.1:5301   (the API)');
-        console.log('  everything else   ->  127.0.0.1:3000   (the UI production build)');
+        console.log(`  /api/* and /ws/*  ->  127.0.0.1:${apiPort}   (the API)`);
+        console.log(`  everything else   ->  127.0.0.1:${uiPort}   (the UI production build)`);
         console.log('\nReference config (Caddy):');
-        run('./bin/print-proxy', ['caddy', domain || 'your.domain', '3000', '']);
+        run('./bin/print-proxy', ['caddy', domain || 'your.domain', uiPort, '']);
         if (await yesno('Also install code-server (VS Code)?', true)) {
           if (run('./bin/setup-code-server')) {
             const up = codeUpstream();
             setEnv('WORKSPACE_CODE_SERVER_URL', '/code');
             console.log('\nAdd a gated /code route to YOUR proxy so VS Code shares the app login. Caddy:');
             console.log('  handle_path /code/* {');
-            console.log('    forward_auth 127.0.0.1:5301 { uri /api/auth/check }');
+            console.log(`    forward_auth 127.0.0.1:${apiPort} { uri /api/auth/check }`);
             console.log(`    reverse_proxy ${up}`);
             console.log('  }');
           }
@@ -343,7 +387,7 @@ async function main() {
 
     // A managed-TLS failure: stop here so the error stays on screen (not buried).
     if (domain && !tlsOk) {
-      const retry = `./bin/setup-tls ${domain} 3000${tlsKind === 'dns' ? ` --dns ${tlsProv}` : ''}${httpsPort !== '443' ? ` --port ${httpsPort}` : ''}`;
+      const retry = `./bin/setup-tls ${domain} ${uiPort}${tlsKind === 'dns' ? ` --dns ${tlsProv}` : ''}${httpsPort !== '443' ? ` --port ${httpsPort}` : ''}`;
       say('TLS setup did NOT complete - see the error just above.');
       console.log(`Fix it, then retry just this step (the error will be the last thing printed):\n  ${retry}`);
       console.log('More detail:  journalctl -u caddy -n 50 --no-pager');
@@ -351,8 +395,8 @@ async function main() {
     }
     // Boot services for any non-skip path (independent of who manages TLS).
     if (tls !== 'skip' && tls !== 'tailscale' && has('systemctl') &&
-        await yesno('Install + start systemd services (API :5301 + UI :3000) on boot?', true))
-      svc = run('./bin/setup-service', ['3000']);
+        await yesno(`Install + start systemd services (API :${apiPort} + UI :${uiPort}) on boot?`, true))
+      svc = run('./bin/setup-service', [uiPort]);
 
     // This server is now reachable remotely. Auth is OFF by default, which means
     // anyone who can reach it has full access - so require a login by default.
@@ -370,10 +414,10 @@ async function main() {
   const url = domain ? `https://${domain}${httpsPort !== '443' ? ':' + httpsPort : ''}` : '';
   const selfProxy = tlsKind === 'self' || tlsKind === 'nginx';
   say('Setup complete');
-  if (svc && selfProxy) console.log(`Running as systemd services: API on 127.0.0.1:5301, UI on 127.0.0.1:3000.\nPoint your reverse proxy at them${domain ? ` and open ${url}` : ''}.`);
+  if (svc && selfProxy) console.log(`Running as systemd services: API on 127.0.0.1:${apiPort}, UI on 127.0.0.1:${uiPort}.\nPoint your reverse proxy at them${domain ? ` and open ${url}` : ''}.`);
   else if (svc) console.log(`Running as systemd services behind your reverse proxy. Open  ${url}`);
-  else if (domain) console.log(`Run the production build behind your proxy:\n  node server/index.js            # API :5301\n  PORT=3000 node build            # UI  :3000\nThen open  ${url}`);
-  else console.log('Start it in two terminals:\n  1) node server/index.js     # API :5301\n  2) npm run dev              # UI  :5300\nThen open  http://localhost:5300');
+  else if (domain) console.log(`Run the production build behind your proxy:\n  node server/index.js              # API :${apiPort}\n  PORT=${uiPort} node build         # UI  :${uiPort}\nThen open  ${url}`);
+  else console.log(`Start it in two terminals:\n  1) node server/index.js     # API :${apiPort}\n  2) npm run dev              # UI  :5300 (vite)\nThen open  http://localhost:5300`);
   console.log("\nLog in to the agent CLI before starting (required):  claude");
   if (authOn) console.log(`${C.b}Auth is ON${C.off} - a login is required. Manage users in Settings.`);
   else {

@@ -61,9 +61,10 @@ if listening "$APIPORT"; then ok "API listening on :$APIPORT"
   else bad "API up but /api/health failing" "journalctl -u workspace-api -n 40 --no-pager"; fi
 else bad "API not listening on :$APIPORT" "node server/index.js   (or sudo systemctl restart workspace-api)"; fi
 
-if listening 3000; then ok "UI (production build) on :3000"
+UIPORT="$(envget WORKSPACE_UI_PORT)"; UIPORT="${UIPORT:-3000}"
+if listening "$UIPORT"; then ok "UI (production build) on :$UIPORT"
 elif listening 5300; then ok "UI (vite dev) on :5300"
-else bad "UI not listening on :3000 (prod) or :5300 (dev)" "local: npm run dev   |   prod: PORT=3000 node build  (or ./bin/setup-service)"; fi
+else bad "UI not listening on :$UIPORT (prod) or :5300 (dev)" "local: npm run dev   |   prod: PORT=$UIPORT node build  (or ./bin/setup-service)"; fi
 
 if [ -n "$PUBURL" ] || [ -n "$PUBHOST" ]; then
   section "Public HTTPS"

@@ -9,7 +9,9 @@ command -v systemctl >/dev/null 2>&1 || {
   echo "systemd not found - this is for Linux. On macOS use launchd / 'brew services'."; exit 1; }
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-UI_PORT="${1:-3000}"
+# UI port: arg wins, else WORKSPACE_UI_PORT from .env (set by the wizard), else 3000.
+UI_PORT="${1:-$(sed -n 's/^WORKSPACE_UI_PORT=//p' "$REPO/.env" 2>/dev/null | head -1)}"
+UI_PORT="${UI_PORT:-3000}"
 USER_NAME="$(id -un)"
 NODE="$(command -v node)"; NODE_DIR="$(dirname "$NODE")"
 NPM="${NODE_DIR}/npm"; [ -x "$NPM" ] || NPM="$(command -v npm)"
