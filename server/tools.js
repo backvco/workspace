@@ -69,9 +69,8 @@ export async function scaffoldTool(cfg, { name, description }) {
   if (!name || !/^[a-z][a-z0-9-]*$/.test(name)) return { error: 'name must be lowercase letters, numbers and dashes' };
   if (!description) return { error: 'describe what the tool should do' };
   const dir = mcpDir(cfg);
-  // name is already restricted to [a-z0-9-] above; basename is belt-and-suspenders
-  // (no path separators reach the join) and makes the sanitizer explicit.
-  const file = path.join(dir, `${path.basename(name)}-mcp.js`);
+  // name is restricted to [a-z0-9-] above, so it cannot contain path separators.
+  const file = path.join(dir, `${name}-mcp.js`);
   if (existsSync(file)) return { error: 'a tool with that name already exists' };
   const template = readFileSync(path.join(dir, '_template-mcp.js'), 'utf8');
   const guide = readFileSync(path.join(dir, 'BUILDING-TOOLS.md'), 'utf8');
