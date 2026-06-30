@@ -11,7 +11,7 @@ import {
   readProject, writeProjectServer, removeProjectServer,
   listProjects, buildDbServer, existingPassword, moveServer
 } from './mcp.js';
-import { list as fsList, read as fsRead, write as fsWrite } from './fs.js';
+import { list as fsList, read as fsRead, write as fsWrite, withinRoots } from './fs.js';
 import { getStats } from './stats.js';
 import {
   listTargets, createTask, startTask, listAgents, stopAgent, removeTask, recordEvent,
@@ -37,6 +37,7 @@ import {
   countUsers, listUsers, createUser, deleteUser, updateUser, setUserPassword, findUser, verifyLogin,
   signToken, verifyToken, setSessionCookie, clearSessionCookie, originAllowed
 } from './auth.js';
+import { rateLimit } from './ratelimit.js';
 import {
   getLoginPolicy, setLoginPolicy, passkeyLoginAllowed, userHasPasskey, STEPUP_TTL_MS,
   passkeyAuthed, createEnrollCode, redeemEnrollCode,
@@ -62,6 +63,11 @@ export function buildRouter(cfg) {
   // --- auth gate (no-op when auth is disabled) + auth/settings routes ---
   r.use(authMiddleware(cfg));
   const authj = express.json({ limit: '64kb' });
+  // Rate limits on credential-handling endpoints (brute-force defense). Login &
+  // passkey assertion are the unauthenticated brute targets; the admin actions are
+  // looser since they already require a session.
+  const loginRl = rateLimit({ name: 'login', windowMs: 60_000, max: 10 });
+  const adminRl = rateLimit({ name: 'admin', windowMs: 60_000, max: 30 });
 
   // Current auth state for the UI's login gate. Always reachable.
   r.get('/auth/status', async (req, res) => {
@@ -84,7 +90,7 @@ export function buildRouter(cfg) {
   r.all('/auth/check', (_req, res) => res.sendStatus(200));
 
   // First-run signup: only allowed while no users exist yet.
-  r.post('/auth/signup', authj, async (req, res) => {
+  r.post('/auth/signup', loginRl, authj, async (req, res) => {
     try {
       if ((await countUsers(cfg)) > 0) return res.status(403).json({ error: 'signup is closed — ask an existing user to add you in Settings' });
       const out = await createUser(cfg, req.body?.username, req.body?.password);
@@ -95,7 +101,7 @@ export function buildRouter(cfg) {
     } catch (e) { (console.error('server error:', e?.message || e), res.status(500).json({ error: 'internal error' })); }
   });
 
-  r.post('/auth/login', authj, async (req, res) => {
+  r.post('/auth/login', loginRl, authj, async (req, res) => {
     try {
       const user = await findUser(cfg, req.body?.username);
       // Always run the scrypt verify (verifyLogin uses a dummy hash when the user is
@@ -139,7 +145,7 @@ export function buildRouter(cfg) {
     const out = await updateUser(cfg, req.params.id, { name: req.body?.name, email: req.body?.email });
     res.status(out.error ? 400 : 200).json(out);
   });
-  r.post('/auth/users/:id/password', authj, async (req, res) => {
+  r.post('/auth/users/:id/password', adminRl, authj, async (req, res) => {
     const out = await setUserPassword(cfg, req.params.id, req.body?.password);
     res.status(out.error ? 400 : 200).json(out);
   });
@@ -159,13 +165,13 @@ export function buildRouter(cfg) {
     res.status(out.error ? 400 : 200).json(out);
   });
   // Admin: clear another user's passkeys (lost device). Behind the auth gate.
-  r.post('/auth/passkey/reset/:id', async (req, res) => {
+  r.post('/auth/passkey/reset/:id', adminRl, async (req, res) => {
     const out = await resetCredentials(cfg, req.params.id);
     res.status(out.error ? 400 : 200).json(out);
   });
   // Admin: issue a one-time enrollment code so a user who's lost their devices can
   // add a new passkey from a password session. Behind the auth gate.
-  r.post('/auth/passkey/enroll-code/:id', async (req, res) => {
+  r.post('/auth/passkey/enroll-code/:id', adminRl, async (req, res) => {
     const out = await createEnrollCode(cfg, req.params.id);
     res.status(out.error ? 400 : 200).json(out);
   });
@@ -187,7 +193,7 @@ export function buildRouter(cfg) {
       res.status(out.error ? 400 : 200).json(out);
     } catch (e) { (console.error('server error:', e?.message || e), res.status(500).json({ error: 'internal error' })); }
   });
-  r.post('/auth/passkey/register-verify', authj, async (req, res) => {
+  r.post('/auth/passkey/register-verify', adminRl, authj, async (req, res) => {
     try {
       const u = sessionUser(cfg, req);
       if (!u) return res.status(401).json({ error: 'sign in first' });
@@ -207,14 +213,14 @@ export function buildRouter(cfg) {
       res.status(out.error ? 400 : 200).json(out);
     } catch (e) { (console.error('server error:', e?.message || e), res.status(500).json({ error: 'internal error' })); }
   });
-  r.post('/auth/passkey/login-options', authj, async (req, res) => {
+  r.post('/auth/passkey/login-options', loginRl, authj, async (req, res) => {
     try {
       if (!cfg.sessionKey) return res.status(500).json({ error: 'server has no WORKSPACE_SESSION_KEY set' });
       if (!passkeyLoginAllowed(await getLoginPolicy(cfg))) return res.status(403).json({ error: 'passkey sign-in is disabled' });
       res.json(await loginOptions(cfg, req));
     } catch (e) { (console.error('server error:', e?.message || e), res.status(500).json({ error: 'internal error' })); }
   });
-  r.post('/auth/passkey/login-verify', authj, async (req, res) => {
+  r.post('/auth/passkey/login-verify', loginRl, authj, async (req, res) => {
     try {
       if (!cfg.sessionKey) return res.status(500).json({ error: 'server has no WORKSPACE_SESSION_KEY set' });
       const policy = await getLoginPolicy(cfg);
@@ -366,6 +372,14 @@ export function buildRouter(cfg) {
   });
 
   // --- Changes: git repos, working-tree status, and HEAD-vs-disk diff ---
+  // Confine every git operation to a configured project root: when a request names
+  // a repo (query or body), it must resolve inside the roots — so git/gh can't be
+  // pointed at an arbitrary directory via path traversal.
+  r.use('/git', express.json({ limit: '256kb' }), (req, res, next) => {
+    const repo = String(req.query.repo || req.body?.repo || '');
+    if (repo && !withinRoots(cfg, repo)) return res.status(400).json({ error: 'repo outside allowed roots' });
+    next();
+  });
   r.get('/git/repos', (_req, res) => res.json({ repos: listRepos(cfg) }));
   r.get('/git/status', async (req, res) => res.json({ changes: await gitStatus(String(req.query.repo || '')) }));
   r.get('/git/diff', async (req, res) => {

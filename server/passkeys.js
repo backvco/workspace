@@ -69,9 +69,9 @@ function hashCode(cfg, code) {
 export async function createEnrollCode(cfg, userId) {
   const u = await getUserById(cfg, userId);
   if (!u) return { error: 'user not found' };
-  const bytes = crypto.randomBytes(9);
+  // crypto.randomInt is rejection-sampled (unbiased), unlike randomBytes % len.
   let code = '';
-  for (let i = 0; i < 9; i++) code += CODE_ALPHABET[bytes[i] % CODE_ALPHABET.length];
+  for (let i = 0; i < 9; i++) code += CODE_ALPHABET[crypto.randomInt(CODE_ALPHABET.length)];
   await q(cfg, `INSERT INTO enroll_codes (user_id, code_hash, created_at) VALUES ($1,$2, now())
                 ON CONFLICT (user_id) DO UPDATE SET code_hash = $2, created_at = now()`,
     [userId, hashCode(cfg, code)]);

@@ -5,14 +5,21 @@ import path from 'node:path';
 
 const MAX_READ = 2 * 1024 * 1024; // 2 MB
 
-function ensureWithin(cfg, p) {
-  const rp = path.resolve(p);
+// Resolve `p` and confirm it sits inside a configured project root, defeating
+// `..` traversal. Throws otherwise. Exported so route handlers (e.g. git) can
+// confine client-supplied paths to the same roots.
+export function ensureWithin(cfg, p) {
+  const rp = path.resolve(String(p ?? ''));
   const ok = cfg.projectRoots.some((r) => {
     const root = path.resolve(r);
     return rp === root || rp.startsWith(root + path.sep);
   });
   if (!ok) throw new Error('path outside allowed roots');
   return rp;
+}
+// Boolean form for guard clauses.
+export function withinRoots(cfg, p) {
+  try { ensureWithin(cfg, p); return true; } catch { return false; }
 }
 
 export function list(cfg, p) {

@@ -44,6 +44,9 @@ export async function addProject(cfg, input) {
 // are excluded so the picker only shows what's addable.
 export async function availableFolders(cfg, rootArg) {
   const roots = cfg.projectRoots || [];
+  // Coerce to a string: a query param can arrive as an array/object (parameter
+  // tampering), which must not slip through the allowlist check below.
+  rootArg = typeof rootArg === 'string' ? rootArg : '';
   // Accept a specific root, else default to the first configured one.
   const root = roots.includes(rootArg) ? rootArg : roots[0];
   if (!root) return [];
