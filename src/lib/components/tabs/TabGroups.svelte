@@ -11,7 +11,7 @@
       <span class="text-3xl opacity-20">›_</span>
       <p class="text-sm">No tabs open</p>
       <button class="text-xs px-3 py-1.5 rounded border border-line hover:bg-elevated hover:text-content"
-        onclick={openTerminal}>Open terminal</button>
+        onclick={() => openTerminal()}>Open terminal</button>
     </div>
   {:else}
     {#each tabStore.groups as group, i (group.id)}

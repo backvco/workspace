@@ -101,14 +101,14 @@ export function activateTab(id) {
   persist();
 }
 
-/** Flag a tab as needing user input (e.g. BEL received). */
+/** Flag a tab as needing user input (e.g. BEL received). @param {string} id */
 export function markNeedsInput(id) {
   if (tabStore.isActive(id)) return; // already visible — no flag needed
   needsInputSet = new Set(needsInputSet);
   needsInputSet.add(id);
 }
 
-/** Clear the needs-input flag (called on tab open / explicit dismiss). */
+/** Clear the needs-input flag (called on tab open / explicit dismiss). @param {string} id */
 export function clearNeedsInput(id) {
   if (!needsInputSet.has(id)) return;
   needsInputSet = new Set(needsInputSet);

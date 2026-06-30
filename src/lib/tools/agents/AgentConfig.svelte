@@ -11,8 +11,8 @@
   let rows = $derived([
     ['Goal', task.goal || '—'],
     ['Done when', task.criteria || '—'],
-    ...(task.steps ? [['Steps', task.steps]] : []),
-    ...(task.context ? [['Context', task.context]] : []),
+    ...(task.steps ? /** @type {[string, any][]} */ ([['Steps', task.steps]]) : []),
+    ...(task.context ? /** @type {[string, any][]} */ ([['Context', task.context]]) : []),
     ['Directory', task.dir],
     ['Worktree', task.worktree || '(none — runs in place)'],
     ['Branch', task.branch || '—'],

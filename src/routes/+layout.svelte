@@ -54,7 +54,7 @@
       const saved = localStorage.getItem('railOpen');
       railOpen = saved !== null ? saved !== '0' : !narrow;
     } catch { railOpen = !narrow; }
-    isPwa = window.matchMedia('(display-mode: standalone)').matches || !!navigator.standalone;
+    isPwa = window.matchMedia('(display-mode: standalone)').matches || !!(/** @type {any} */ (navigator).standalone);
     initTheme();
     // Check auth before loading project data (API calls 401 while gated).
     api.authStatus()
@@ -71,7 +71,7 @@
     const vv = window.visualViewport;
     if (vv) {
       function applyVV() {
-        document.documentElement.style.setProperty('--vvh', vv.height + 'px');
+        document.documentElement.style.setProperty('--vvh', /** @type {VisualViewport} */ (vv).height + 'px');
         // Refit terminals after the keyboard animation settles.
         clearTimeout(vpTimer);
         vpTimer = setTimeout(() => window.dispatchEvent(new CustomEvent('workspace:refit')), 200);
