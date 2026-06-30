@@ -34,7 +34,7 @@ import {
 import { listRoots } from './projects.js';
 import {
   authMiddleware, getAuthEnabled, setAuthEnabled, sessionUser,
-  countUsers, listUsers, createUser, deleteUser, updateUser, setUserPassword, findUser, verifyLogin,
+  countUsers, listUsers, getUser, gravatarUrl, createUser, deleteUser, updateUser, setUserPassword, findUser, verifyLogin,
   signToken, verifyToken, setSessionCookie, clearSessionCookie, originAllowed
 } from './auth.js';
 import { rateLimit } from './ratelimit.js';
@@ -74,11 +74,13 @@ export function buildRouter(cfg) {
     let enabled = false;
     try { enabled = await getAuthEnabled(cfg); } catch {}
     const user = enabled ? sessionUser(cfg, req) : null;
+    let email = '';
+    if (user) { try { email = (await getUser(cfg, user.uid))?.email || ''; } catch {} }
     let needsBootstrap = false;
     try { needsBootstrap = (await countUsers(cfg)) === 0; } catch {}
     let loginPolicy = 'password';
     try { loginPolicy = await getLoginPolicy(cfg); } catch {}
-    res.json({ authEnabled: enabled, authed: !!user, user: user ? { id: user.uid, username: user.name } : null, needsBootstrap, hasSessionKey: !!cfg.sessionKey, loginPolicy, passkeysEnabled: passkeyLoginAllowed(loginPolicy) });
+    res.json({ authEnabled: enabled, authed: !!user, user: user ? { id: user.uid, username: user.name, email, avatar: gravatarUrl(email) } : null, needsBootstrap, hasSessionKey: !!cfg.sessionKey, loginPolicy, passkeysEnabled: passkeyLoginAllowed(loginPolicy) });
   });
 
   // Forward-auth endpoint for the reverse proxy: lets you gate OTHER same-origin

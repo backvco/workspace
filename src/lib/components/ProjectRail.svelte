@@ -6,8 +6,9 @@
   import { projectStore, setActive, addProject, removeProject } from '$lib/projects.svelte.js';
   import { tabStore } from '$lib/tabs/store.svelte.js';
   import FilterSelect from '$lib/components/FilterSelect.svelte';
+  import Avatar from '$lib/components/Avatar.svelte';
 
-  /** @type {{ user?: {username:string}|null, onLogout?: () => void }} */
+  /** @type {{ user?: {username:string,avatar?:string}|null, onLogout?: () => void }} */
   let { user = null, onLogout = () => {} } = $props();
 
   let adding = $state(false);
@@ -152,7 +153,7 @@
   <!-- signed-in user + logout (only when auth is on) -->
   {#if user}
     <div class="border-t border-line px-3 py-2 flex items-center gap-2 text-xs text-muted">
-      <span class="w-5 h-5 shrink-0 grid place-items-center rounded-full bg-elevated text-content text-[10px] uppercase font-semibold">{user.username?.[0] || '?'}</span>
+      <Avatar src={user.avatar} name={user.username} size={20} />
       <span class="flex-1 truncate" title="Signed in as {user.username}">{user.username}</span>
       <button class="hover:text-content underline shrink-0" title="Sign out" onclick={onLogout}>Sign out</button>
     </div>

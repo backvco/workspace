@@ -112,9 +112,24 @@ export async function userExists(cfg, id) {
 export async function countUsers(cfg) {
   return Number((await q(cfg, 'SELECT count(*)::int AS n FROM users'))[0]?.n || 0);
 }
+// Single user's public profile (used to surface email for the session user).
+export async function getUser(cfg, id) {
+  if (!id) return null;
+  const rows = await q(cfg, 'SELECT data FROM users WHERE data->>\'id\' = $1', [String(id)]);
+  const d = rows[0]?.data;
+  return d ? { id: d.id, username: d.username, name: d.name || '', email: d.email || '' } : null;
+}
+// Gravatar URL from an email (d=404 so the client can fall back to an initial
+// when the address has no Gravatar). Returns '' for a blank email.
+export function gravatarUrl(email, size = 96) {
+  const e = String(email || '').trim().toLowerCase();
+  if (!e) return '';
+  const hash = crypto.createHash('md5').update(e).digest('hex');
+  return `https://www.gravatar.com/avatar/${hash}?s=${size}&d=404`;
+}
 export async function listUsers(cfg) {
   const rows = await q(cfg, 'SELECT data FROM users ORDER BY created_at');
-  return rows.map((r) => ({ id: r.data.id, username: r.data.username, name: r.data.name || '', email: r.data.email || '', createdAt: r.data.createdAt, passkeyCount: (r.data.credentials || []).length }));
+  return rows.map((r) => ({ id: r.data.id, username: r.data.username, name: r.data.name || '', email: r.data.email || '', avatar: gravatarUrl(r.data.email), createdAt: r.data.createdAt, passkeyCount: (r.data.credentials || []).length }));
 }
 export async function findUser(cfg, username) {
   const rows = await q(cfg, 'SELECT data FROM users WHERE lower(data->>\'username\') = lower($1)', [String(username || '')]);

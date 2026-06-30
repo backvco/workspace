@@ -3,6 +3,7 @@
   // (display name, email, set password, and that user's passkeys / devices).
   import { api } from '$lib/api.js';
   import Modal from '$lib/components/Modal.svelte';
+  import Avatar from '$lib/components/Avatar.svelte';
   import PasswordInput from '$lib/components/PasswordInput.svelte';
   import { enrollPasskey, passkeysSupported, deviceLabel } from '$lib/passkeys.js';
   import { s, flash, reload } from './store.svelte.js';
@@ -134,13 +135,16 @@
       <ul>
         {#each s.users as u (u.id)}
           <li>
-            <button class="w-full text-left rounded px-2 py-1.5 text-sm {u.id === selectedId ? 'bg-elevated text-content' : 'text-muted hover:text-content hover:bg-elevated/50'}"
+            <button class="w-full text-left rounded px-2 py-1.5 text-sm flex items-center gap-2 {u.id === selectedId ? 'bg-elevated text-content' : 'text-muted hover:text-content hover:bg-elevated/50'}"
               onclick={() => selectUser(u.id)}>
-              <div class="flex items-center justify-between">
-                <span class="truncate">{u.name || u.username}</span>
-                {#if u.passkeyCount > 0}<span class="ml-2 shrink-0 text-[10px] text-muted">🔑 {u.passkeyCount}</span>{/if}
+              <Avatar src={u.avatar} name={u.name || u.username} size={28} />
+              <div class="min-w-0 flex-1">
+                <div class="flex items-center justify-between">
+                  <span class="truncate">{u.name || u.username}</span>
+                  {#if u.passkeyCount > 0}<span class="ml-2 shrink-0 text-[10px] text-muted">🔑 {u.passkeyCount}</span>{/if}
+                </div>
+                {#if u.name}<div class="text-[10px] text-muted truncate">{u.username}</div>{/if}
               </div>
-              {#if u.name}<div class="text-[10px] text-muted truncate">{u.username}</div>{/if}
             </button>
           </li>
         {/each}
@@ -154,8 +158,11 @@
       <div class="text-sm text-muted">Select a user.</div>
     {:else}
       <div class="flex items-center justify-between">
-        <div class="font-medium">{selected.username}{#if isSelf}<span class="ml-2 text-xs text-muted">(you)</span>{/if}</div>
-        <button class="text-xs text-red-500 hover:text-red-400" onclick={removeUser}>Delete user</button>
+        <div class="flex items-center gap-2 min-w-0">
+          <Avatar src={selected.avatar} name={selected.name || selected.username} size={32} />
+          <div class="font-medium truncate">{selected.username}{#if isSelf}<span class="ml-2 text-xs text-muted">(you)</span>{/if}</div>
+        </div>
+        <button class="text-xs text-red-500 hover:text-red-400 shrink-0" onclick={removeUser}>Delete user</button>
       </div>
 
       <!-- profile -->

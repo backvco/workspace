@@ -98,6 +98,7 @@ export async function createPlanner(cfg, { project, goal, override }) {
   const p = { id, ns, dir, title, planName: title, proposed: [], preflight, createdAt: Date.now() };
   trustDir(dir);
   const baseline = preflightSummary(preflight);
+  const permFile = path.join(cfg.agentPermDir, 'planner.json');
   const seed = [
     `You are a planning assistant for the project at ${dir}.`,
     repos.length ? `Repos in this project:\n${repos.map((r) => `- ${r}`).join('\n')}` : '',
@@ -143,7 +144,6 @@ export async function createPlanner(cfg, { project, goal, override }) {
     ``,
     `Begin now.`
   ].filter(Boolean).join('\n').replace(/'/g, `'\\''`);
-  const permFile = path.join(cfg.agentPermDir, 'planner.json');
   const mcpScript = path.join(cfg.appRoot, 'server', 'mcp', 'tickets-mcp.js');
   const mcpConfig = JSON.stringify({ mcpServers: { tickets: { command: 'node', args: [mcpScript], env: { WORKSPACE_PORT: String(cfg.port), WORKSPACE_API_TOKEN: cfg.internalToken, PLANNER_ID: id } } } });
   const runCmd = `cd '${dir}' && PATH='${cfg.binDir}':"$PATH" PLANNER_ID='${id}' WORKSPACE_PORT='${cfg.port}' WORKSPACE_API_TOKEN='${cfg.internalToken}' ${cfg.claudeBin || 'claude'} --model opus --mcp-config '${mcpConfig}' --settings '${permFile}' '${seed}'`;

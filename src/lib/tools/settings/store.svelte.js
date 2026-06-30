@@ -8,7 +8,7 @@ export const s = $state({
   status: null,
   /** @type {{projectRoots:string[], termCwd:string, dataDir:string, agentBin:string, hasSessionKey:boolean}|null} */
   config: null,
-  /** @type {{id:string,username:string,name:string,email:string,createdAt:number,passkeyCount:number}[]} */
+  /** @type {{id:string,username:string,name:string,email:string,avatar:string,createdAt:number,passkeyCount:number}[]} */
   users: [],
   busy: false,
   msg: '',

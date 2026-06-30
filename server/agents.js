@@ -7,7 +7,7 @@
 // Lifecycle: todo -> planning -> plan-review -> executing -> (blocked) -> review -> done
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, existsSync, readFileSync, writeFileSync, readdirSync, statSync, renameSync } from 'node:fs';
+import { mkdirSync, existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import path from 'node:path';
 import { sessionName } from './config.js';
 import { listRepos, defaultBranch } from './git.js';
