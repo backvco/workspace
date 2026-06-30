@@ -2,10 +2,12 @@
   // Users master-detail: left column = accounts; selecting one loads its detail
   // (display name, email, set password, and that user's passkeys / devices).
   import { api } from '$lib/api.js';
+  import Modal from '$lib/components/Modal.svelte';
   import { enrollPasskey, passkeysSupported, deviceLabel } from '$lib/passkeys.js';
   import { s, flash, reload } from './store.svelte.js';
 
   let selectedId = $state('');
+  let showAdd = $state(false);
   let selected = $derived(s.users.find((u) => u.id === selectedId) || null);
   let isSelf = $derived(!!selected && selected.id === s.status?.user?.id);
 
@@ -58,7 +60,7 @@
     const r = await api.authAddUser(newUser.trim(), newUserPass);
     s.busy = false;
     if (r.error) return flash(r.error, true);
-    const id = r.id; newUser = ''; newUserPass = '';
+    const id = r.id; newUser = ''; newUserPass = ''; showAdd = false;
     flash('User added.'); await reload(); if (id) selectUser(id);
   }
   async function removeUser() {
@@ -108,6 +110,8 @@
 <div class="grid grid-cols-[14rem_1fr] gap-4 h-full min-h-0">
   <!-- master list -->
   <div class="rounded-lg border border-line bg-card p-2 overflow-auto">
+    <button class="w-full mb-2 text-xs bg-green-700 hover:bg-green-600 text-white rounded px-3 py-1.5"
+      onclick={() => { newUser = ''; newUserPass = ''; showAdd = true; }}>+ New user</button>
     {#if s.users.length === 0}
       <div class="text-xs text-muted p-2">No users yet.</div>
     {:else}
@@ -126,12 +130,6 @@
         {/each}
       </ul>
     {/if}
-    <div class="mt-2 border-t border-line pt-2 space-y-1">
-      <input class="w-full bg-elevated border border-line rounded px-2 py-1 text-xs" placeholder="new username" bind:value={newUser} autocomplete="off" />
-      <input class="w-full bg-elevated border border-line rounded px-2 py-1 text-xs" placeholder="password (min 6)" type="password" bind:value={newUserPass} autocomplete="new-password" />
-      <button class="w-full text-xs bg-green-700 hover:bg-green-600 text-white rounded px-3 py-1 disabled:opacity-40"
-        disabled={s.busy || !newUser.trim() || newUserPass.length < 6} onclick={addUser}>Add user</button>
-    </div>
   </div>
 
   <!-- detail -->
@@ -195,3 +193,18 @@
     {/if}
   </div>
 </div>
+
+{#if showAdd}
+  <Modal title="New user" onClose={() => (showAdd = false)} max="max-w-sm">
+    <form class="space-y-2" onsubmit={(e) => { e.preventDefault(); addUser(); }}>
+      <input class="w-full bg-elevated border border-line rounded px-2 py-1.5 text-sm" placeholder="username" bind:value={newUser} autocomplete="off" />
+      <!-- svelte-ignore a11y_autofocus -->
+      <input class="w-full bg-elevated border border-line rounded px-2 py-1.5 text-sm" placeholder="password (min 6)" type="password" bind:value={newUserPass} autocomplete="new-password" />
+      <div class="flex justify-end gap-2 pt-1">
+        <button type="button" class="text-xs border border-line rounded px-3 py-1.5 text-muted hover:text-content" onclick={() => (showAdd = false)}>Cancel</button>
+        <button type="submit" class="text-xs bg-green-700 hover:bg-green-600 text-white rounded px-3 py-1.5 disabled:opacity-40"
+          disabled={s.busy || !newUser.trim() || newUserPass.length < 6}>Add user</button>
+      </div>
+    </form>
+  </Modal>
+{/if}
