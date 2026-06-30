@@ -106,10 +106,13 @@ export function buildRouter(cfg) {
 
   r.post('/auth/login', loginRl, authj, async (req, res) => {
     try {
-      const user = await findUser(cfg, req.body?.username);
+      const username = req.body?.username;
+      const password = req.body?.password;
+      if (req.body && Object.prototype.hasOwnProperty.call(req.body, 'password')) delete req.body.password;
+      const user = await findUser(cfg, username);
       // Always run the scrypt verify (verifyLogin uses a dummy hash when the user is
       // unknown) so response time can't reveal whether a username exists.
-      const passOk = verifyLogin(req.body?.password, user);
+      const passOk = verifyLogin(password, user);
       if (!user || !passOk) return res.status(401).json({ error: 'invalid username or password' });
       if (!cfg.sessionKey) return res.status(500).json({ error: 'server has no WORKSPACE_SESSION_KEY set' });
       // Apply the login policy. A user with no enrolled passkey always keeps plain
