@@ -83,14 +83,28 @@ function deployDetached() {
   child.unref();
 }
 
-/** Pull (fast, synchronous) then kick a detached deploy. */
-export async function runUpdate() {
+/**
+ * Bring the checkout to origin/<branch> then kick a detached deploy.
+ * - normal: `git pull --ff-only` — refuses (returns the error) if the checkout
+ *   has diverged, so a deploy box can never silently lose local commits.
+ * - force: `git fetch` + `git reset --hard origin/<branch>` — the escape hatch
+ *   for a box that diverged (e.g. origin was force-pushed/rewritten). DESTRUCTIVE:
+ *   discards any local commits/changes on the checkout.
+ */
+export async function runUpdate(force = false) {
   if (updating) return { ok: false, error: 'an update is already in progress' };
   updating = true;
   try {
     const branch = ((await git(['rev-parse', '--abbrev-ref', 'HEAD'])).out || 'master').trim();
-    const pull = await git(['pull', '--ff-only', 'origin', branch]);
-    if (!pull.ok) return { ok: false, error: (pull.err || pull.out).trim() || 'git pull --ff-only failed' };
+    if (force) {
+      const fetch = await git(['fetch', '--prune', 'origin']);
+      if (!fetch.ok) return { ok: false, error: (fetch.err || 'git fetch failed').trim() };
+      const reset = await git(['reset', '--hard', `origin/${branch}`]);
+      if (!reset.ok) return { ok: false, error: (reset.err || 'git reset --hard failed').trim() };
+    } else {
+      const pull = await git(['pull', '--ff-only', 'origin', branch]);
+      if (!pull.ok) return { ok: false, error: (pull.err || pull.out).trim() || 'git pull --ff-only failed' };
+    }
     const head = short((await git(['rev-parse', 'HEAD'])).out);
     deployDetached();
     return { ok: true, deploying: true, head };

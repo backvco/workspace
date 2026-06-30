@@ -464,8 +464,8 @@ export function buildRouter(cfg) {
     try { res.json(await updateStatus()); }
     catch (e) { (console.error('version error:', e?.message || e), res.status(500).json({ error: 'internal error' })); }
   });
-  r.post('/update', async (_req, res) => {
-    try { res.json(await runUpdate()); }
+  r.post('/update', async (req, res) => {
+    try { res.json(await runUpdate(String(req.query.force || '') === '1')); }
     catch (e) { (console.error('update error:', e?.message || e), res.status(500).json({ error: 'internal error' })); }
   });
 

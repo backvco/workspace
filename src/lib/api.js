@@ -28,7 +28,8 @@ export const api = {
 
   // --- self-update (workspace's own checkout) ---
   version: () => json('/api/version'),
-  selfUpdate: () => json('/api/update', { method: 'POST' }),
+  /** @param {boolean} [force] force=reset --hard to origin (for a diverged checkout) */
+  selfUpdate: (force = false) => json(`/api/update${force ? '?force=1' : ''}`, { method: 'POST' }),
 
   // --- clipboard explorer (pasted images, per workspace) ---
   clipboardList: () => json('/api/clipboard'),

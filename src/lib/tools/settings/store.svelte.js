@@ -8,6 +8,8 @@ export const s = $state({
   status: null,
   /** @type {{projectRoots:string[], termCwd:string, dataDir:string, agentBin:string, hasSessionKey:boolean}|null} */
   config: null,
+  /** @type {{branch:string, head:string, remote:string, deployed:string, ahead:number, behind:number, incoming:{hash:string,subject:string}[], dirty:boolean, updateAvailable:boolean, buildStale:boolean, canFastForward:boolean}|null} */
+  version: null,
   /** @type {{id:string,username:string,name:string,email:string,avatar:string,createdAt:number,passkeyCount:number}[]} */
   users: [],
   busy: false,
@@ -22,5 +24,6 @@ export function flash(/** @type {string} */ m, isErr = false) {
 export async function reload() {
   try { s.status = await api.authStatus(); } catch (e) { console.error('Failed to load auth status:', e); }
   try { s.config = await api.serverConfig(); } catch (e) { console.error('Failed to load server config:', e); }
+  try { s.version = await api.version(); } catch (e) { console.error('Failed to load version:', e); }
   try { s.users = (await api.authUsers()).users; } catch (e) { console.error('Failed to load auth users:', e); }
 }

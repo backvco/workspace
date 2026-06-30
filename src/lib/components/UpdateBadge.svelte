@@ -5,12 +5,12 @@
   // kicks a redeploy, then reloads once the new build is serving.
   import { onMount } from 'svelte';
   import { api } from '$lib/api.js';
+  import { runSelfUpdate } from '$lib/selfupdate.js';
 
   /** @type {any} */ let v = $state(null);
   let open = $state(false);
   let phase = $state(/** @type {'idle'|'pulling'|'deploying'|'done'|'error'} */ ('idle'));
   let message = $state('');
-  let pendingHead = $state('');
 
   async function refresh() {
     try { v = await api.version(); } catch { /* keep last good */ }
@@ -29,35 +29,10 @@
     if (open) refresh();
   }
 
-  async function doUpdate() {
-    phase = 'pulling';
-    message = '';
-    let res;
-    try { res = await api.selfUpdate(); }
-    catch (e) { phase = 'error'; message = String(/** @type {any} */ (e)?.message || e); return; }
-    if (!res?.ok) { phase = 'error'; message = res?.error || 'update failed'; return; }
-    pendingHead = res.head;
-    phase = 'deploying';
-    message = 'Building & restarting…';
-    // Poll until the new commit is the one actually serving, then reload to pick
-    // up the fresh JS bundle (the running page is still the old build).
-    const started = Date.now();
-    const tick = async () => {
-      await refresh();
-      if (v && v.deployed === pendingHead && !v.buildStale) {
-        phase = 'done';
-        message = 'Updated — reloading…';
-        setTimeout(() => location.reload(), 1200);
-        return;
-      }
-      if (Date.now() - started > 180_000) {
-        phase = 'error';
-        message = 'Deploy is taking longer than expected — check the server.';
-        return;
-      }
-      setTimeout(tick, 4000);
-    };
-    setTimeout(tick, 4000);
+  /** @param {boolean} [force] */
+  async function doUpdate(force = false) {
+    if (force && !confirm('Force update: reset this checkout to origin and discard any local commits/changes, then redeploy. Continue?')) return;
+    await runSelfUpdate(force, (p, m) => { phase = p; message = m; });
   }
 
   const busy = $derived(phase === 'pulling' || phase === 'deploying');
@@ -104,18 +79,26 @@
           <p class="text-xs text-amber-600 dark:text-amber-400 mb-2">⚠ Local changes present in the checkout — the pull is refused if they clash.</p>
         {/if}
         {#if !v.canFastForward && phase === 'idle'}
-          <p class="text-xs text-amber-600 dark:text-amber-400 mb-2">⚠ The checkout has {v.ahead} unpushed commit{v.ahead === 1 ? '' : 's'}; it can't fast-forward. Resolve in a terminal.</p>
+          <p class="text-xs text-amber-600 dark:text-amber-400 mb-2">⚠ The checkout has {v.ahead} unpushed commit{v.ahead === 1 ? '' : 's'} — it can't fast-forward. Force-update to discard them and match origin.</p>
         {/if}
 
         {#if message}
           <p class="text-xs {phase === 'error' ? 'text-red-600 dark:text-red-400' : 'text-muted'} mb-2 break-words">{message}</p>
         {/if}
 
-        <button
-          class="w-full h-8 rounded-md bg-accent text-white text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-          disabled={busy || !v.canFastForward}
-          onclick={doUpdate}
-        >{busy ? (phase === 'pulling' ? 'Pulling…' : 'Deploying…') : 'Update & deploy'}</button>
+        {#if v.canFastForward}
+          <button
+            class="w-full h-8 rounded-md bg-accent text-white text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={busy}
+            onclick={() => doUpdate(false)}
+          >{busy ? (phase === 'pulling' ? 'Pulling…' : 'Deploying…') : 'Update & deploy'}</button>
+        {:else}
+          <button
+            class="w-full h-8 rounded-md border border-red-500/50 text-red-600 dark:text-red-400 hover:bg-red-500/10 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={busy}
+            onclick={() => doUpdate(true)}
+          >{busy ? (phase === 'pulling' ? 'Resetting…' : 'Deploying…') : 'Force update (reset to origin)'}</button>
+        {/if}
       </div>
     {/if}
   </div>
