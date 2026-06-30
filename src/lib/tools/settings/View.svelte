@@ -7,6 +7,7 @@
   import SettingsUsers from './SettingsUsers.svelte';
   import SettingsClipboard from './SettingsClipboard.svelte';
   import SettingsBackups from './SettingsBackups.svelte';
+  import SettingsSessions from './SettingsSessions.svelte';
 
   const TABS = [
     { id: 'general', label: 'General' },
@@ -14,6 +15,7 @@
     { id: 'users', label: 'Users' },
     { id: 'clipboard', label: 'Clipboard' },
     { id: 'backups', label: 'Backups' },
+    { id: 'sessions', label: 'Sessions' },
   ];
   let active = $state('general');
   onMount(reload);
@@ -32,7 +34,7 @@
   {#if s.msg}<div class="mb-3 rounded border border-green-600/40 bg-green-600/10 text-green-700 dark:text-green-300 px-3 py-2">{s.msg}</div>{/if}
   {#if s.err}<div class="mb-3 rounded border border-red-600/40 bg-red-600/10 text-red-700 dark:text-red-300 px-3 py-2">{s.err}</div>{/if}
 
-  <div class="flex-1 min-h-0 {active === 'users' || active === 'clipboard' || active === 'backups' ? '' : 'max-w-2xl'}">
+  <div class="flex-1 min-h-0 {active === 'users' || active === 'clipboard' || active === 'backups' || active === 'sessions' ? '' : 'max-w-2xl'}">
     {#if active === 'general'}
       <SettingsGeneral />
     {:else if active === 'auth'}
@@ -43,6 +45,8 @@
       <SettingsClipboard />
     {:else if active === 'backups'}
       <SettingsBackups />
+    {:else if active === 'sessions'}
+      <SettingsSessions />
     {/if}
   </div>
 </div>

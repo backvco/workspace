@@ -46,6 +46,13 @@ export const api = {
   backupConfig: (body) => jsonSafe('/api/backups/config', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
   backupRestore: (/** @type {string} */ name) => jsonSafe('/api/backups/restore', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, confirm: name }) }),
 
+  // --- idle agent-session reaper (GC settings + live sessions) ---
+  reaper: () => json('/api/reaper'),
+  /** @param {{enabled?:boolean, idleMs?:number, intervalMs?:number}} body */
+  reaperConfig: (body) => jsonSafe('/api/reaper/config', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+  reaperSweep: () => jsonSafe('/api/reaper/sweep', { method: 'POST' }),
+  reaperKill: (/** @type {string} */ name) => jsonSafe(`/api/reaper/sessions/${encodeURIComponent(name)}/kill`, { method: 'POST' }),
+
   // --- auth + settings ---
   authStatus: () => json('/api/auth/status'),
   /** @param {string} username @param {string} password */

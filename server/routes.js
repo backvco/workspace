@@ -50,6 +50,7 @@ import {
   listBackups, backupFile, deleteBackup, createBackup, restoreBackup,
   getBackupSettings, setBackupSettings, backupsAvailable
 } from './backups.js';
+import { getReaperSettings, setReaperSettings, listOwnedSessions, reapIdleAgents, killOwnedSession } from './agent-reaper.js';
 
 const EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' };
 const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -298,6 +299,24 @@ export function buildRouter(cfg) {
     if (req.body?.confirm !== req.body?.name) return res.status(400).json({ error: 'confirmation does not match' });
     try { await restoreBackup(cfg, req.body.name); res.json({ ok: true }); }
     catch (e) { res.status(400).json({ error: e?.message || 'restore failed' }); }
+  });
+
+  // --- idle agent-session reaper: admin-editable GC settings + manual sweep/kill
+  //     (see agent-reaper.js — sessions are agent/chat/plan-review/planner only,
+  //     never the operator's manual terminal tabs) ---
+  r.get('/reaper', adminRl, async (_req, res) => {
+    try { res.json({ settings: await getReaperSettings(cfg), sessions: await listOwnedSessions(cfg) }); }
+    catch (e) { (console.error('server error:', e?.message || e), res.status(500).json({ error: 'internal error' })); }
+  });
+  r.post('/reaper/config', adminRl, authj, async (req, res) => {
+    res.json({ ok: true, settings: await setReaperSettings(cfg, req.body || {}) });
+  });
+  r.post('/reaper/sweep', adminRl, async (_req, res) => {
+    try { res.json({ ok: true, ...(await reapIdleAgents(cfg)) }); }
+    catch (e) { res.status(400).json({ error: e?.message || 'sweep failed' }); }
+  });
+  r.post('/reaper/sessions/:name/kill', adminRl, async (req, res) => {
+    res.json(await killOwnedSession(cfg, req.params.name));
   });
 
   // --- projects: the registry the left rail manages; each scopes its own tabs ---
