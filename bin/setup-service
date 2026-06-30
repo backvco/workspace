@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# setup-service [ui_port] - install + enable systemd units so Workspace starts on
+# boot as the PRODUCTION build: workspace-api (:5301) and workspace-ui (node build).
+# Linux/systemd only. Run from a checkout; pair it with a reverse proxy (bin/setup-tls)
+# since the production UI does not proxy /api itself.
+set -euo pipefail
+
+command -v systemctl >/dev/null 2>&1 || {
+  echo "systemd not found - this is for Linux. On macOS use launchd / 'brew services'."; exit 1; }
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+UI_PORT="${1:-3000}"
+USER_NAME="$(id -un)"
+NODE="$(command -v node)"; NODE_DIR="$(dirname "$NODE")"
+NPM="${NODE_DIR}/npm"; [ -x "$NPM" ] || NPM="$(command -v npm)"
+PATH_LINE="${NODE_DIR}:/usr/local/bin:/usr/bin:/bin:${HOME}/.local/bin"
+
+# Make sure deps are installed (root for the UI build, server/ for the API) and the
+# UI is built, before we install units that would otherwise crash-loop on missing deps.
+[ -d "$REPO/node_modules" ] || (cd "$REPO" && npm install)
+[ -d "$REPO/server/node_modules/express" ] || (cd "$REPO/server" && npm install)
+[ -d "$REPO/build" ] || (cd "$REPO" && npm run build)
+
+echo "Installing systemd units (user=${USER_NAME}, node=${NODE})..."
+
+sudo tee /etc/systemd/system/workspace-api.service >/dev/null <<EOF
+[Unit]
+Description=Workspace API
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=${USER_NAME}
+WorkingDirectory=${REPO}
+Environment=PATH=${PATH_LINE}
+# Self-heal: install the API's deps if they're missing instead of crash-looping.
+ExecStartPre=/bin/sh -c '[ -d "${REPO}/server/node_modules/express" ] || ${NPM} --prefix "${REPO}/server" install'
+ExecStart=${NODE} ${REPO}/server/index.js
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# SvelteKit's node build (adapter-node) needs to know its PUBLIC origin behind a
+# reverse proxy, or it errors (HTTP 500). Take it from .env (the wizard wrote it).
+PUBLIC_URL="$(sed -n 's/^WORKSPACE_PUBLIC_URL=//p' "$REPO/.env" 2>/dev/null | head -1)"
+if [ -z "$PUBLIC_URL" ]; then
+  ph="$(sed -n 's/^WORKSPACE_PUBLIC_HOST=//p' "$REPO/.env" 2>/dev/null | head -1)"
+  [ -n "$ph" ] && PUBLIC_URL="https://$ph"
+fi
+ORIGIN_ENV=""
+[ -n "$PUBLIC_URL" ] && ORIGIN_ENV="Environment=ORIGIN=${PUBLIC_URL}
+Environment=PROTOCOL_HEADER=x-forwarded-proto
+Environment=HOST_HEADER=x-forwarded-host
+"
+
+sudo tee /etc/systemd/system/workspace-ui.service >/dev/null <<EOF
+[Unit]
+Description=Workspace UI (production build)
+After=network-online.target workspace-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${USER_NAME}
+WorkingDirectory=${REPO}
+Environment=PATH=${PATH_LINE}
+Environment=PORT=${UI_PORT}
+# Bind the UI to loopback so the ONLY public surface is the reverse proxy (which
+# does TLS + any IP allowlist). Caddy/nginx reach it on 127.0.0.1.
+Environment=HOST=127.0.0.1
+${ORIGIN_ENV}ExecStart=${NODE} ${REPO}/build
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now workspace-api.service workspace-ui.service
+
+cat <<EOF
+
+Installed + started: workspace-api (:5301), workspace-ui (:${UI_PORT}).
+  Status:  systemctl status workspace-api workspace-ui
+  Logs:    journalctl -u workspace-api -f
+  Update:  git pull && npm install && (cd server && npm install) && npm run build && sudo systemctl restart workspace-api workspace-ui
+EOF

@@ -1,0 +1,14 @@
+{
+  "name": "workspace-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "dependencies": {
+    "@simplewebauthn/server": "^13.3.2",
+    "express": "^4.21.2",
+    "node-pty": "^1.1.0",
+    "pg": "^8.22.0",
+    "ws": "^8.18.0"
+  }
+}

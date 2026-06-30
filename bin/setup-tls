@@ -1,0 +1,337 @@
+#!/usr/bin/env bash
+# setup-tls <domain> [ui_port] [--dns <provider>] - serve Workspace over HTTPS with
+# automatic, auto-renewing Let's Encrypt certificates via Caddy.
+#
+#   ./bin/setup-tls workspace.example.com                  # HTTP-01 (needs public 80/443)
+#   ./bin/setup-tls workspace.example.com --dns cloudflare # DNS-01 (NO public ports)
+#
+# HTTP-01 validates by Let's Encrypt reaching port 80 on your PUBLIC IP - that means
+# exposing the server to the internet (keep app auth ON + firewall 443 to your mesh).
+# DNS-01 validates via a TXT record on your DNS provider, so NOTHING is exposed: the
+# domain's A record can even point at your Tailscale/NetBird IP. DNS-01 is preferred
+# for private/mesh deployments. Provider credentials come from /etc/caddy/dns.env
+# (see bin/dns-credentials). Providers: cloudflare, route53, google, digitalocean.
+#
+# Runs the PRODUCTION build: node server/index.js (:5301) + node build (:ui_port).
+set -euo pipefail
+
+banner() { # W.ai wordmark: large W, small ai
+  printf '\033[1;34m'
+  cat <<'ART'
+   __        __
+   \ \      / /
+    \ \ /\ / /
+     \ V  V /
+      \_/\_/  ai
+ART
+  printf '\033[0m\033[2m   Workspace AI  -  TLS setup\033[0m\n\n'
+}
+banner
+
+DOMAIN="${1:?usage: bin/setup-tls <domain> [ui_port] [--dns <provider>] [--port <https_port>] [--allow <cidrs>]}"; shift
+UI_PORT=3000
+DNS_PROVIDER=""
+HTTPS_PORT=443   # public HTTPS listen port; non-443 means no :80 redirect
+ALLOW_CIDRS=""   # optional: only these IPs/CIDRs may reach the app (comma/space sep)
+CODE_SERVER=""   # optional: code-server upstream (e.g. 127.0.0.1:8080) to serve at /code
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dns)         DNS_PROVIDER="${2:?--dns needs a provider}"; shift 2 ;;
+    --port)        HTTPS_PORT="${2:?--port needs a number}"; shift 2 ;;
+    --allow)       ALLOW_CIDRS="${2:?--allow needs CIDRs}"; shift 2 ;;
+    --code-server) CODE_SERVER="${2:?--code-server needs an upstream host:port}"; shift 2 ;;
+    *)             UI_PORT="$1"; shift ;;
+  esac
+done
+API_PORT="${WORKSPACE_PORT:-5301}"
+
+# Optional source-IP allowlist: block everyone NOT in these CIDRs. The ACME HTTP-01
+# challenge runs on Caddy's separate :80 handler, so it's unaffected by this gate.
+allow_directive=""
+if [ -n "$ALLOW_CIDRS" ]; then
+  cidrs="$(echo "$ALLOW_CIDRS" | tr ',' ' ')"
+  allow_directive="    @blocked not remote_ip $cidrs"$'\n    respond @blocked "Forbidden" 403\n'
+fi
+# Site address Caddy serves on. A non-443 port disables the automatic :80 redirect.
+site_addr="$DOMAIN"; [ "$HTTPS_PORT" != 443 ] && site_addr="$DOMAIN:$HTTPS_PORT"
+
+# Map a DNS provider to its Caddy module + the tls{} directive it needs.
+dns_module=""; dns_block=""
+case "$DNS_PROVIDER" in
+  "")            ;;
+  cloudflare)    dns_module=cloudflare;     dns_block='dns cloudflare {env.CLOUDFLARE_API_TOKEN}' ;;
+  route53)       dns_module=route53;        dns_block='dns route53' ;;
+  google)        dns_module=googleclouddns; dns_block='dns googleclouddns {' ;;  # gcp_project added below
+  digitalocean)  dns_module=digitalocean;   dns_block='dns digitalocean {env.DO_AUTH_TOKEN}' ;;
+  *) echo "unknown DNS provider: $DNS_PROVIDER (cloudflare|route53|google|digitalocean)"; exit 1 ;;
+esac
+
+# Don't fight an existing reverse proxy on the ports we need - emit an nginx config
+# instead. On 443 we also use :80 (ACME/redirect); a custom port uses only itself.
+# Our OWN Caddy already owning those ports is fine (a re-run): we rewrite + reload.
+if [ "$HTTPS_PORT" = 443 ]; then portfilter='sport = :80 or sport = :443'; else portfilter="sport = :$HTTPS_PORT"; fi
+ours=0
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet caddy 2>/dev/null; then ours=1; fi
+if command -v ss >/dev/null 2>&1 && sudo ss -ltnpH "$portfilter" 2>/dev/null | grep -qi caddy; then ours=1; fi
+if [ "$ours" = 0 ] && command -v ss >/dev/null 2>&1 && ss -ltnH "$portfilter" 2>/dev/null | grep -q .; then
+  echo "Something other than Caddy is already listening on the port(s) Caddy needs ($portfilter)."
+  echo "If you use nginx, add this and run 'sudo certbot --nginx -d $DOMAIN':"
+  echo
+  "$(dirname "$0")/print-proxy" nginx "$DOMAIN" "$UI_PORT" "$ALLOW_CIDRS"
+  exit 1
+fi
+
+# Install the Caddy binary (optionally WITH a DNS-provider module) + a systemd unit.
+install_caddy_binary() {
+  local module="${1:-}" arch a url tmp
+  arch="$(uname -m)"
+  case "$arch" in x86_64|amd64) a=amd64 ;; aarch64|arm64) a=arm64 ;; armv7l|armv7) a=armv7 ;; *) a=amd64 ;; esac
+  url="https://caddyserver.com/api/download?os=linux&arch=$a"
+  [ -n "$module" ] && url="$url&p=github.com/caddy-dns/$module"
+  # Download to a temp file then mv into place: a running caddy holds the binary
+  # open, so writing it directly fails with "text file busy" (curl error 23). A
+  # rename swaps the name; the old process keeps its inode until we restart it.
+  tmp="$(mktemp)"
+  curl -fsSL -o "$tmp" "$url" || { echo "ERROR: failed to download Caddy from $url"; rm -f "$tmp"; exit 1; }
+  chmod +x "$tmp"
+  sudo mv "$tmp" /usr/local/bin/caddy
+  sudo chown root:root /usr/local/bin/caddy 2>/dev/null || true
+  id caddy >/dev/null 2>&1 || sudo useradd --system --create-home --home-dir /var/lib/caddy --shell /usr/sbin/nologin caddy 2>/dev/null || true
+  sudo mkdir -p /etc/caddy
+  sudo tee /etc/systemd/system/caddy.service >/dev/null <<UNIT
+[Unit]
+Description=Caddy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=caddy
+Group=caddy
+EnvironmentFile=-/etc/caddy/dns.env
+ExecStart=/usr/local/bin/caddy run --config /etc/caddy/Caddyfile
+ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --force
+Restart=on-failure
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  sudo systemctl daemon-reload
+  sudo systemctl enable caddy
+  BINARY_CADDY=1   # we replaced the binary - a reload won't switch to it, must restart
+}
+
+# --- build the tls{} block for DNS-01 (empty for HTTP-01, Caddy handles it) ---
+tls_directive=""
+if [ -n "$DNS_PROVIDER" ]; then
+  if [ "$DNS_PROVIDER" = google ]; then
+    tls_directive=$'    tls {\n        dns googleclouddns {\n            gcp_project {env.GCP_PROJECT}\n        }\n    }\n'
+  else
+    tls_directive=$'    tls {\n        '"$dns_block"$'\n    }\n'
+  fi
+fi
+
+# Optional gated code-server route. Served same-origin at /code so the app's session
+# cookie applies and the iframe can embed it; forward_auth makes Caddy check
+# /api/auth/check (this app's login) before proxying - VS Code shares the app's auth.
+code_block=""
+if [ -n "$CODE_SERVER" ]; then
+  # handle_path STRIPS the /code prefix: code-server serves at root with relative
+  # asset paths, which resolve correctly under /code/ (it 404s if the prefix is kept).
+  code_block=$'    handle_path /code/* {\n        forward_auth localhost:'"$API_PORT"$' {\n            uri /api/auth/check\n        }\n        reverse_proxy '"$CODE_SERVER"$'\n    }\n'
+fi
+
+# The site block we manage, kept in its OWN drop-in file so we never clobber other
+# sites a shared Caddy may serve. (No global options: those would affect every site.)
+# With code-server we wrap the app routes in their own handle so the /code handle is
+# matched separately (handle blocks are mutually exclusive by path).
+if [ -n "$CODE_SERVER" ]; then
+  SITE="$(cat <<EOF
+$site_addr {
+$allow_directive$tls_directive$code_block    handle {
+        @api path /api/* /ws/*
+        reverse_proxy @api localhost:$API_PORT
+        reverse_proxy localhost:$UI_PORT
+    }
+}
+EOF
+)"
+else
+  SITE="$(cat <<EOF
+$site_addr {
+$allow_directive$tls_directive    @api path /api/* /ws/*
+    reverse_proxy @api localhost:$API_PORT
+    reverse_proxy localhost:$UI_PORT
+}
+EOF
+)"
+fi
+
+# --- decide how to apply without disturbing an existing/foreign Caddy ---
+BINARY_CADDY=0
+running_bin=""; frag=""; foreign=0
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet caddy 2>/dev/null; then
+  frag="$(systemctl show -p FragmentPath --value caddy 2>/dev/null)"
+  running_bin="$(systemctl show -p ExecStart --value caddy 2>/dev/null | sed -n 's/.*path=\([^ ;}]*\).*/\1/p' | head -1)"
+  [ -n "$running_bin" ] || running_bin="$(systemctl show -p ExecStart --value caddy 2>/dev/null | awk '{print $1; exit}')"
+  case "$frag" in
+    /etc/systemd/system/caddy.service|"") : ;;   # we manage it, or none
+    *) foreign=1 ;;                               # externally managed (apt, etc.)
+  esac
+fi
+[ -n "$running_bin" ] || running_bin="$(command -v caddy 2>/dev/null || true)"
+
+module_ok=0
+if [ -z "$DNS_PROVIDER" ]; then module_ok=1
+elif [ -n "$running_bin" ] && "$running_bin" list-modules 2>/dev/null | grep -q "dns.providers.$dns_module"; then module_ok=1
+fi
+
+if [ "$foreign" = 1 ] && [ "$module_ok" = 0 ]; then
+  echo "An externally-managed Caddy is running (unit: $frag) and lacks the '$dns_module'"
+  echo "DNS module. Replacing it could break other sites it serves, so we're stopping."
+  echo "Add the module to that Caddy, or add this site block to its config yourself:"
+  echo
+  printf '%s\n' "$SITE"
+  exit 1
+elif [ "$foreign" = 1 ]; then
+  echo "Adding our site to the existing (externally-managed) Caddy via a drop-in file."
+elif [ "$module_ok" = 0 ]; then
+  echo "Installing the Caddy binary with the $DNS_PROVIDER DNS module..."
+  install_caddy_binary "$dns_module"
+elif ! command -v caddy >/dev/null 2>&1; then
+  echo "Installing Caddy..."
+  if   command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
+    sudo apt-get update && sudo apt-get install -y caddy
+  elif command -v pacman >/dev/null 2>&1; then sudo pacman -S --noconfirm caddy
+  elif command -v apk    >/dev/null 2>&1; then sudo apk add caddy
+  elif command -v brew   >/dev/null 2>&1; then brew install caddy
+  else install_caddy_binary
+  fi
+fi
+
+# Binary we'll validate/run with.
+caddybin=/usr/local/bin/caddy
+[ "$BINARY_CADDY" = 1 ] || caddybin="${running_bin:-$(command -v caddy 2>/dev/null || echo /usr/local/bin/caddy)}"
+
+# --- write the config: OUR caddy -> single Caddyfile (no dup sites); a FOREIGN
+#     caddy -> a drop-in we import, so we never clobber its other sites ---
+CADDYFILE="${CADDYFILE:-/etc/caddy/Caddyfile}"
+CONFD="$(dirname "$CADDYFILE")/conf.d"
+slug="$(printf '%s_%s' "$DOMAIN" "$HTTPS_PORT" | tr -c 'a-zA-Z0-9._-' '_')"
+confd_file="$CONFD/workspace-$slug.caddy"
+backup=""
+sudo mkdir -p "$(dirname "$CADDYFILE")"
+if [ "$foreign" = 1 ]; then
+  sudo mkdir -p "$CONFD"
+  printf '%s\n' "$SITE" | sudo tee "$confd_file" >/dev/null
+  echo "Wrote $confd_file (drop-in for the existing Caddy)"
+  if [ ! -f "$CADDYFILE" ]; then
+    printf 'import %s/*.caddy\n' "$CONFD" | sudo tee "$CADDYFILE" >/dev/null
+  elif ! sudo grep -qE "import +($CONFD/\*\.caddy|conf\.d/\*\.caddy)" "$CADDYFILE" 2>/dev/null; then
+    printf '\nimport %s/*.caddy\n' "$CONFD" | sudo tee -a "$CADDYFILE" >/dev/null
+    echo "Added 'import $CONFD/*.caddy' to $CADDYFILE (existing config preserved)."
+  fi
+else
+  # We manage this Caddy: write the whole file (back it up first) and drop any
+  # stale drop-in from an earlier run so the site isn't defined twice.
+  [ -f "$CADDYFILE" ] && { backup="$CADDYFILE.workspace.bak"; sudo cp "$CADDYFILE" "$backup"; }
+  printf '%s\n' "$SITE" | sudo tee "$CADDYFILE" >/dev/null
+  sudo rm -f "$CONFD"/workspace-*.caddy 2>/dev/null || true
+  echo "Wrote $CADDYFILE"
+fi
+
+# --- validate BEFORE applying, so a mistake can't take the running Caddy down ---
+if ! validate_out="$(sudo "$caddybin" validate --adapter caddyfile --config "$CADDYFILE" 2>&1)"; then
+  echo "ERROR: the resulting Caddy config is invalid - NOT applying it (running config untouched):"
+  printf '%s\n' "$validate_out" | sed 's/^/  /' | tail -25
+  if [ "$foreign" = 1 ]; then sudo rm -f "$confd_file"
+  elif [ -n "$backup" ]; then sudo cp "$backup" "$CADDYFILE"; fi
+  exit 1
+fi
+
+caddy_log() { echo "Recent Caddy log:"; sudo journalctl -u caddy -n 30 --no-pager 2>/dev/null | sed 's/^/  /'; }
+
+# --- apply: reload (no downtime for other sites); restart only on a binary swap ---
+if command -v systemctl >/dev/null 2>&1; then
+  applied=0
+  if [ "$BINARY_CADDY" = 1 ]; then
+    sudo systemctl restart caddy && applied=1 || true
+  elif sudo systemctl reload caddy 2>/dev/null; then
+    applied=1
+  elif sudo systemctl restart caddy; then
+    applied=1
+  fi
+  if [ "$applied" != 1 ]; then
+    echo "ERROR: Caddy failed to start/reload with the new config - rolling back."
+    caddy_log
+    if [ "$foreign" = 1 ]; then sudo rm -f "$confd_file"
+    elif [ -n "$backup" ]; then sudo cp "$backup" "$CADDYFILE"; sudo systemctl restart caddy 2>/dev/null || true; fi
+    exit 1
+  fi
+else
+  "$caddybin" reload --config "$CADDYFILE" 2>/dev/null || echo "Start Caddy: $caddybin run --config $CADDYFILE"
+fi
+
+url="https://$DOMAIN"; [ "$HTTPS_PORT" != 443 ] && url="https://$DOMAIN:$HTTPS_PORT"
+
+# --- verify: Caddy on the RIGHT port, a real cert, AND the backend reachable ---
+# 1) Did Caddy actually bind our port? If not, it failed to start that site - fail
+#    fast with its log rather than waiting 2 minutes for a cert that can't come.
+if command -v ss >/dev/null 2>&1; then
+  listening=0
+  for _ in 1 2 3 4 5 6; do
+    # -p shows the process name so we can confirm it's Caddy (not just any listener).
+    if sudo ss -ltnpH "sport = :$HTTPS_PORT" 2>/dev/null | grep -qi caddy; then listening=1; break; fi
+    sleep 1
+  done
+  if [ "$listening" != 1 ]; then
+    echo "ERROR: Caddy is not listening on :$HTTPS_PORT - it failed to start this site."
+    caddy_log
+    exit 1
+  fi
+  echo "Caddy is listening on :$HTTPS_PORT."
+fi
+
+# 2) Wait for a real cert. Test the LOCAL Caddy via --resolve so a wrong/missing DNS
+#    A record can't cause a false failure (the cert is still valid for the hostname).
+#    curl prints '000' on any connect/TLS failure; use '|| true' (NOT '|| echo 000').
+printf 'Waiting for a valid HTTPS cert at %s (up to ~2 min) ' "$url"
+code=000
+for _ in $(seq 1 24); do
+  code="$(curl -sS --max-time 8 --resolve "$DOMAIN:$HTTPS_PORT:127.0.0.1" -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || true)"
+  [ -z "$code" ] && code=000
+  [ "$code" != 000 ] && break
+  printf '.'; sleep 5
+done
+echo
+
+backend_up=0
+if command -v ss >/dev/null 2>&1 && sudo ss -ltnH "sport = :$UI_PORT" 2>/dev/null | grep -q .; then backend_up=1; fi
+
+if [ "$code" = 000 ]; then
+  echo "FAILED: the HTTPS certificate did not issue (no handshake at $url)."
+  echo "The Caddy log below shows why - for DNS-01 look for a DNS API auth/permission error:"
+  caddy_log
+  exit 1
+elif [ "$code" = 502 ] || [ "$code" = 503 ]; then
+  echo "HTTPS + certificate are WORKING, but the app backend returned $code (it's down)."
+  [ "$backend_up" = 0 ] && echo "  UI not listening on :$UI_PORT. Start it:  npm run build && PORT=$UI_PORT node build   (or ./bin/setup-service)"
+else
+  echo "SUCCESS: $url is live (HTTP $code) with a valid certificate."
+fi
+[ "$backend_up" = 0 ] && [ "$code" != 000 ] && echo "Also ensure the API is running on :$API_PORT (node server/index.js)."
+echo
+[ "$HTTPS_PORT" != 443 ] && echo "Serving on custom port $HTTPS_PORT."
+[ -n "$ALLOW_CIDRS" ] && echo "Access restricted to: $ALLOW_CIDRS (others get 403; ACME challenge stays open)."
+if [ -z "$DNS_PROVIDER" ] && [ "$HTTPS_PORT" = 443 ]; then
+  cat <<EOF
+
+WARNING: HTTP-01 means this server is reachable on the PUBLIC internet (ports 80/443).
+  Keep app auth ON and firewall :443 to your mesh CIDR. For no public ports, use --dns <provider>.
+EOF
+fi
+echo
+echo "Set this in .env so the API trusts the origin:  WORKSPACE_PUBLIC_HOST=$DOMAIN"

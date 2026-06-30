@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# install-deps - install the system tools Workspace needs that are missing.
+#
+#   ./bin/install-deps                    # install missing tmux + git
+#   ./bin/install-deps --postgres         # also install a LOCAL Postgres server
+#   ./bin/install-deps --docker-postgres  # install Docker (if needed) + run a
+#                                         #   Postgres container with a named volume
+#
+# Auto-installs only the always-local CLI tools (tmux, git) by default. Postgres
+# is opt-in. The agent CLI and Node are reported but not installed - they're
+# per-provider / version-sensitive.
+set -euo pipefail
+
+if   command -v apt-get >/dev/null 2>&1; then PM=apt-get; INSTALL="sudo apt-get install -y"; PG=postgresql
+elif command -v dnf     >/dev/null 2>&1; then PM=dnf;     INSTALL="sudo dnf install -y";     PG=postgresql-server
+elif command -v yum     >/dev/null 2>&1; then PM=yum;     INSTALL="sudo yum install -y";     PG=postgresql-server
+elif command -v pacman  >/dev/null 2>&1; then PM=pacman;  INSTALL="sudo pacman -S --noconfirm"; PG=postgresql
+elif command -v brew    >/dev/null 2>&1; then PM=brew;    INSTALL="brew install";            PG=postgresql
+elif command -v apk     >/dev/null 2>&1; then PM=apk;     INSTALL="sudo apk add";             PG=postgresql
+else echo "No supported package manager found (apt/dnf/yum/pacman/brew/apk)."; echo "Install tmux and git manually."; exit 1; fi
+
+mode="${1:-}"
+PG_PORT="${2:-5432}"   # host port to publish the Postgres container on
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Replace-or-append KEY=VALUE in a .env file (creating it from .env.example if needed).
+write_env_line() { # <file> <key> <value>
+  local f="$1" k="$2" v="$3"
+  [ -f "$f" ] || { [ -f "$REPO/.env.example" ] && cp "$REPO/.env.example" "$f" || : > "$f"; }
+  if grep -q "^[# ]*${k}=" "$f" 2>/dev/null; then
+    sed -i "s|^[# ]*${k}=.*|${k}=${v}|" "$f"
+  else
+    printf '%s=%s\n' "$k" "$v" >> "$f"
+  fi
+}
+
+# --- Docker + Postgres container provisioning (opt-in) ---------------------------
+ensure_docker() {
+  if command -v docker >/dev/null 2>&1; then return 0; fi
+  echo "Installing Docker..."
+  case "$PM" in
+    apt-get) curl -fsSL https://get.docker.com | sh ;;                 # Debian/Ubuntu
+    dnf)     sudo dnf install -y docker || curl -fsSL https://get.docker.com | sh ;;   # Amazon Linux 2023 / Fedora
+    yum)     sudo yum install -y docker \
+               || sudo amazon-linux-extras install -y docker 2>/dev/null \
+               || curl -fsSL https://get.docker.com | sh ;;            # Amazon Linux 2 / RHEL
+    pacman)  sudo pacman -S --noconfirm docker ;;
+    apk)     sudo apk add docker ;;
+    brew)    brew install --cask docker
+             echo "Launch Docker Desktop, then re-run: ./bin/install-deps --docker-postgres"; exit 0 ;;
+  esac
+  sudo systemctl enable --now docker 2>/dev/null || true
+  sudo usermod -aG docker "$(id -un)" 2>/dev/null || true
+  echo "Note: you may need to log out/in (or run 'newgrp docker') to use docker without sudo."
+}
+
+provision_postgres_docker() {
+  ensure_docker
+  # Use sudo for docker if the daemon isn't reachable as the current user yet.
+  local D=docker; docker info >/dev/null 2>&1 || D="sudo docker"
+  local envf="$REPO/.env"
+  if $D ps -a --format '{{.Names}}' 2>/dev/null | grep -qx workspace-db; then
+    echo "Container 'workspace-db' already exists - starting it."
+    $D start workspace-db >/dev/null
+    if [ -f "$envf" ] && grep -q '^WORKSPACE_DATABASE_URL=' "$envf"; then
+      echo "Keeping the existing WORKSPACE_DATABASE_URL in .env."
+    else
+      echo "NOTE: reusing an existing DB, but .env has no WORKSPACE_DATABASE_URL. Set it to"
+      echo "      the password this container was created with: postgres://postgres:<pw>@127.0.0.1:5432/workspace"
+    fi
+  else
+    # Bind to LOOPBACK only (not 0.0.0.0) so the DB is never reachable off-box. Reuse
+    # the password already in .env if present (the data volume keeps its original
+    # password and ignores POSTGRES_PASSWORD once initialized); otherwise random.
+    local pass=""
+    [ -f "$envf" ] && pass="$(sed -n 's|^WORKSPACE_DATABASE_URL=postgres://[^:]*:\([^@]*\)@.*|\1|p' "$envf" | head -1)"
+    if [ -n "$pass" ]; then
+      echo "Creating Postgres container 'workspace-db' (127.0.0.1 only, reusing .env password)..."
+    else
+      pass="$(LC_ALL=C tr -dc 'a-zA-Z0-9' </dev/urandom 2>/dev/null | head -c 28)"
+      [ -n "$pass" ] || pass="$(date +%s)$$"
+      echo "Creating Postgres container 'workspace-db' (127.0.0.1 only, random password)..."
+    fi
+    $D run -d --name workspace-db --restart unless-stopped \
+      -e POSTGRES_DB=workspace -e POSTGRES_PASSWORD="$pass" \
+      -p "127.0.0.1:${PG_PORT}:5432" -v workspace-db-data:/var/lib/postgresql/data \
+      postgres:16 >/dev/null
+    write_env_line "$envf" WORKSPACE_DATABASE_URL "postgres://postgres:${pass}@127.0.0.1:${PG_PORT}/workspace"
+    echo "Postgres is running on 127.0.0.1:${PG_PORT}; WORKSPACE_DATABASE_URL written to .env."
+  fi
+}
+
+# --- system CLI tools (always) ---------------------------------------------------
+need=()
+command -v tmux >/dev/null 2>&1 || need+=(tmux)
+command -v git  >/dev/null 2>&1 || need+=(git)
+[ "$mode" = "--postgres" ] && { command -v psql >/dev/null 2>&1 || need+=("$PG"); }
+
+if [ ${#need[@]} -eq 0 ]; then
+  echo "tmux and git already installed."
+else
+  echo "Installing via $PM: ${need[*]}"
+  $INSTALL "${need[@]}"
+  echo "done."
+fi
+
+# --- C/C++ build toolchain (node-pty compiles a native addon when no prebuilt
+#     binary exists for this platform, e.g. linux-arm64) ---------------------------
+have_cxx() { command -v g++ >/dev/null 2>&1 || command -v c++ >/dev/null 2>&1; }
+if ! command -v make >/dev/null 2>&1 || ! have_cxx; then
+  echo "Installing a C/C++ build toolchain (needed to compile node-pty)..."
+  case "$PM" in
+    apt-get) $INSTALL build-essential python3 ;;
+    dnf|yum) $INSTALL gcc gcc-c++ make python3 ;;
+    pacman)  sudo pacman -S --noconfirm base-devel python ;;
+    apk)     $INSTALL build-base python3 ;;
+    brew)    xcode-select --install 2>/dev/null || true ;;  # macOS: Xcode CLT gives clang/make
+  esac
+fi
+
+[ "$mode" = "--docker-postgres" ] && provision_postgres_docker
+
+# --- report-only (not auto-installed) --------------------------------------------
+command -v node >/dev/null 2>&1 || echo "WARNING: node not found - install Node 22+ (https://nodejs.org or nvm)."
+if [ "$mode" != "--postgres" ] && [ "$mode" != "--docker-postgres" ] && ! command -v psql >/dev/null 2>&1; then
+  echo "Note: No local Postgres detected. Recommended: ./bin/install-deps --docker-postgres (or --postgres for a local server)."
+fi
+echo "Note: The agent CLI (e.g. Claude Code) is optional - install it on your PATH and set WORKSPACE_CLAUDE_BIN if you want agents."

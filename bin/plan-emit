@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# plan-emit '<json array of tickets>' — the planning session calls this to push a
+# proposed ticket breakdown to the board. No-op outside a planning session.
+set -euo pipefail
+[ -z "${PLANNER_ID:-}" ] && { echo "plan-emit: not in a planning session"; exit 0; }
+PORT="${WORKSPACE_PORT:-5301}"
+ARR="${1:-[]}"
+curl -s -X POST "http://127.0.0.1:${PORT}/api/planners/${PLANNER_ID}/tickets" \
+  -H 'content-type: application/json' \
+  ${WORKSPACE_API_TOKEN:+-H "x-workspace-token: ${WORKSPACE_API_TOKEN}"} \
+  --data-binary "$(printf '{"tickets":%s}' "$ARR")" >/dev/null 2>&1 || true
+echo "plan-emit: proposed tickets sent to the board — review and Create them there."

@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# uninstall - cleanly remove what the Workspace installer set up. Interactive and
+# non-destructive by default: it asks before each step and NEVER deletes your repo,
+# your .env, or your project files unless you explicitly opt in. Run from a checkout:
+#   ./bin/uninstall
+set -uo pipefail   # not -e: keep going even if a step has nothing to remove
+
+banner() {
+  printf '\033[1;34m'
+  cat <<'ART'
+   __        __
+   \ \      / /
+    \ \ /\ / /
+     \ V  V /
+      \_/\_/  ai
+ART
+  printf '\033[0m\033[2m   Workspace AI  -  uninstall\033[0m\n\n'
+}
+banner
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+ask() { # ask "<prompt>" -> 0 if yes. Default NO (safe). Reads /dev/tty so it works under pipes.
+  local a=""
+  if [ -r /dev/tty ]; then printf '%s [y/N]: ' "$1" > /dev/tty; read -r a < /dev/tty || a=""; fi
+  case "$a" in [Yy]*) return 0 ;; *) return 1 ;; esac
+}
+have() { command -v "$1" >/dev/null 2>&1; }
+
+echo "This removes services and optional components the installer added. Nothing is"
+echo "deleted without you confirming it. Repo dir: $REPO"
+echo
+
+# --- 1. systemd services (workspace-api, workspace-ui, workspace-code-server) ---
+if have systemctl; then
+  for unit in workspace-ui workspace-api workspace-code-server; do
+    if systemctl list-unit-files 2>/dev/null | grep -q "^${unit}.service"; then
+      if ask "Stop + remove the ${unit} service?"; then
+        sudo systemctl disable --now "${unit}.service" 2>/dev/null
+        sudo rm -f "/etc/systemd/system/${unit}.service"
+        echo "  removed ${unit}"
+      fi
+    fi
+  done
+  sudo systemctl daemon-reload 2>/dev/null
+fi
+
+# --- 2. Caddy: our drop-in / managed config (leave a shared Caddy's other sites alone) ---
+if [ -f /etc/caddy/Caddyfile ] || ls /etc/caddy/conf.d/workspace-*.caddy >/dev/null 2>&1; then
+  if ask "Remove our Caddy config (drop-ins + restore backup if present)?"; then
+    sudo rm -f /etc/caddy/conf.d/workspace-*.caddy
+    [ -f /etc/caddy/Caddyfile.workspace.bak ] && sudo mv /etc/caddy/Caddyfile.workspace.bak /etc/caddy/Caddyfile
+    sudo systemctl reload caddy 2>/dev/null || sudo systemctl restart caddy 2>/dev/null || true
+    echo "  Caddy config cleaned (other sites untouched)"
+  fi
+  if systemctl list-unit-files 2>/dev/null | grep -q '^caddy.service' && ask "Also stop + remove Caddy itself (only if WE installed it)?"; then
+    sudo systemctl disable --now caddy 2>/dev/null
+    sudo rm -f /etc/systemd/system/caddy.service /usr/local/bin/caddy
+    sudo systemctl daemon-reload 2>/dev/null
+    echo "  removed Caddy"
+  fi
+fi
+
+# --- 3. DNS-01 credentials ---
+if [ -f /etc/caddy/dns.env ] || [ -f /etc/caddy/gcp-dns.json ]; then
+  if ask "Remove the DNS-01 credentials in /etc/caddy (dns.env, gcp-dns.json)?"; then
+    sudo rm -f /etc/caddy/dns.env /etc/caddy/gcp-dns.json
+    echo "  removed DNS creds (the cloud-side service account/token, if any, is yours to delete)"
+  fi
+fi
+
+# --- 4. code-server (the binary the installer added) ---
+if have code-server && ask "Uninstall code-server (VS Code) itself?"; then
+  if have dpkg && dpkg -l code-server >/dev/null 2>&1; then sudo dpkg -r code-server
+  elif have rpm && rpm -q code-server >/dev/null 2>&1; then sudo rpm -e code-server
+  else sudo rm -f "$(command -v code-server)"; fi
+  rm -rf "$HOME/.config/code-server" "$HOME/.local/share/code-server" 2>/dev/null
+  echo "  removed code-server"
+fi
+
+# --- 5. Docker Postgres (data loss!) ---
+if have docker && (docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx workspace-db || sudo docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx workspace-db); then
+  D=docker; docker info >/dev/null 2>&1 || D="sudo docker"
+  if ask "Remove the Postgres container 'workspace-db'?"; then
+    $D rm -f workspace-db >/dev/null 2>&1
+    echo "  removed container workspace-db"
+    if ask "  Also DELETE its data volume 'workspace-db-data'? (ALL workspace data is lost)"; then
+      $D volume rm workspace-db-data >/dev/null 2>&1 && echo "  deleted volume workspace-db-data"
+    fi
+  fi
+fi
+
+# --- 6. the repo + .env (explicit opt-in; default keep) ---
+echo
+echo "Left in place: this checkout ($REPO), your .env, and your project files."
+if ask "Delete the .env file (contains your session key + DB URL)?"; then
+  rm -f "$REPO/.env" && echo "  deleted .env"
+fi
+
+echo
+echo "Done. Re-run ./install.sh anytime to set things up again."

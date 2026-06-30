@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# setup-code-server [preferred_port] - make code-server (VS Code in the browser)
+# available on LOCALHOST so it is reachable only through this app's reverse proxy,
+# which gates it with the app's own login (forward_auth -> /api/auth/check).
+#
+# It is idempotent and conflict-safe:
+#   - if a code-server is ALREADY running on loopback, it reuses that (no new service),
+#   - otherwise it installs a service on a FREE port (preferred 8080, or the next free).
+# The chosen upstream (127.0.0.1:<port>) is printed and written to .code-server-upstream
+# so the wizard can point the proxy at the right port. Pair with:
+#   bin/setup-tls ... --code-server <upstream>
+set -euo pipefail
+
+banner() { # W.ai wordmark: large W, small ai
+  printf '\033[1;34m'
+  cat <<'ART'
+   __        __
+   \ \      / /
+    \ \ /\ / /
+     \ V  V /
+      \_/\_/  ai
+ART
+  printf '\033[0m\033[2m   Workspace AI  -  code-server (VS Code) setup\033[0m\n\n'
+}
+banner
+
+REQ_PORT="${1:-8080}"
+USER_NAME="$(id -un)"
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+
+port_busy() { command -v ss >/dev/null 2>&1 && sudo ss -ltnH "sport = :$1" 2>/dev/null | grep -q .; }
+
+# A code-server already serving on loopback? Return 127.0.0.1:<port>, else empty.
+detect_running() {
+  local addr=""
+  if command -v systemctl >/dev/null 2>&1 && \
+     { systemctl is-active --quiet "code-server@${USER_NAME}" 2>/dev/null || systemctl is-active --quiet workspace-code-server 2>/dev/null; }; then
+    addr="$(sed -n 's/^bind-addr:[[:space:]]*//p' "$HOME/.config/code-server/config.yaml" 2>/dev/null | head -1)"
+  fi
+  if [ -z "$addr" ] && command -v ss >/dev/null 2>&1; then
+    addr="$(sudo ss -ltnpH 2>/dev/null | grep -i 'code-server' | grep -oE '127\.0\.0\.1:[0-9]+' | head -1)"
+  fi
+  case "$addr" in 127.0.0.1:[0-9]*) echo "$addr" ;; *) : ;; esac
+}
+
+# First free port at/after $1.
+free_port() {
+  local p="$1" i=0
+  while [ "$i" -lt 40 ]; do
+    port_busy "$p" || { echo "$p"; return; }
+    p=$((p + 1)); i=$((i + 1))
+  done
+  echo "$1"
+}
+
+upstream="$(detect_running)"
+if [ -n "$upstream" ]; then
+  echo "code-server is already running at $upstream - reusing it (no new service installed)."
+else
+  if ! command -v code-server >/dev/null 2>&1; then
+    echo "Installing code-server..."
+    curl -fsSL https://code-server.dev/install.sh | sh
+  fi
+  CS="$(command -v code-server || echo /usr/bin/code-server)"
+  [ -x "$CS" ] || { echo "ERROR: code-server not found after install."; exit 1; }
+
+  PORT="$(free_port "$REQ_PORT")"
+  [ "$PORT" != "$REQ_PORT" ] && echo "Port $REQ_PORT is in use; using $PORT instead."
+
+  if command -v systemctl >/dev/null 2>&1; then
+    echo "Installing the code-server service on 127.0.0.1:${PORT} (localhost only)..."
+    sudo tee /etc/systemd/system/workspace-code-server.service >/dev/null <<UNIT
+[Unit]
+Description=Workspace code-server (VS Code)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${USER_NAME}
+Environment=HOME=${HOME}
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:${HOME}/.local/bin
+ExecStart=${CS} --bind-addr 127.0.0.1:${PORT} --auth none --disable-telemetry --disable-update-check
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now workspace-code-server.service
+    sleep 1
+    if port_busy "$PORT"; then echo "code-server is listening on 127.0.0.1:${PORT}."
+    else echo "WARNING: code-server did not come up on :${PORT} - check: journalctl -u workspace-code-server -n 40 --no-pager"; fi
+  else
+    echo "No systemd here. Start code-server yourself, bound to localhost:"
+    echo "  ${CS} --bind-addr 127.0.0.1:${PORT} --auth none &"
+  fi
+  upstream="127.0.0.1:${PORT}"
+fi
+
+# Record the chosen upstream so the wizard / setup-tls point the proxy at the right port.
+printf '%s\n' "$upstream" > "$REPO/.code-server-upstream" 2>/dev/null || true
+echo "CODE_SERVER_UPSTREAM=$upstream"
+
+cat <<EOF
+
+code-server upstream: $upstream  (loopback only - reachable solely via the proxy).
+To embed it (gated by THIS app's login), serve it at /code and set WORKSPACE_CODE_SERVER_URL=/code:
+
+  ./bin/setup-tls <domain> 3000 --dns <provider> --port <https_port> --code-server $upstream
+
+The setup wizard does this for you. Without app auth ENABLED, /code is open to anyone who
+can reach the site (it is a full editor + terminal) - turn auth on in Settings.
+EOF

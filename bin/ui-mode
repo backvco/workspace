@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Switch the live workspace UI between the production node build and vite dev
+# (hot-reload). Flips both the systemd unit and the nginx `/` upstream port.
+#   bin/ui-mode prod   node build :5310 + auto-deploy watcher   (normal mode)
+#   bin/ui-mode dev    vite hot-reload :5300, watcher paused     (escape hatch)
+#
+# MAINTAINER-ONLY dev tool for the project's own deployment (a containerized nginx
+# whose conf is bind-mounted by inode + a workspace-ui-dev unit). Not part of a
+# self-hosted install. Override the conf path for a different layout:
+#   WORKSPACE_NGINX_CONF=/path/to/default.conf bin/ui-mode dev
+set -euo pipefail
+CONF="${WORKSPACE_NGINX_CONF:-/workspace/code/nginx/default.conf}"
+push_nginx() {
+  docker exec -i nginx-container sh -c 'cat > /etc/nginx/conf.d/default.conf' < "$CONF"
+  docker exec nginx-container nginx -t >/dev/null && docker exec nginx-container nginx -s reload
+}
+case "${1:-}" in
+  dev)
+    sudo systemctl stop workspace-ui-deploy 2>/dev/null || true
+    sudo systemctl stop workspace-ui 2>/dev/null || true
+    sudo systemctl start workspace-ui-dev
+    sed -i 's#proxy_pass http://localhost:5310;#proxy_pass http://localhost:5300;#' "$CONF"
+    push_nginx
+    echo "[ui-mode] DEV — vite hot-reload on :5300. Edit src/** and it live-reloads."
+    echo "          Run 'bin/ui-mode prod' to switch back to the production build."
+    ;;
+  prod)
+    sudo systemctl stop workspace-ui-dev 2>/dev/null || true
+    sed -i 's#proxy_pass http://localhost:5300;#proxy_pass http://localhost:5310;#' "$CONF"
+    push_nginx
+    sudo systemctl start workspace-ui
+    sudo systemctl start workspace-ui-deploy 2>/dev/null || true
+    echo "[ui-mode] PROD — node build on :5310 + auto-deploy watcher on."
+    ;;
+  *)
+    echo "usage: bin/ui-mode <dev|prod>"; exit 1 ;;
+esac

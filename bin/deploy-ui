@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Deploy the workspace UI: build the SvelteKit node app, then restart the
+# service. This is the deploy step now that the UI runs a production build
+# instead of vite dev (no hot-reload).
+#
+# ATOMIC + SERIALIZED so a deploy can never serve 500s:
+#   - flock: the manual run and the auto-deploy watcher can't build at once
+#     (concurrent builds into build/ left the running server reading a
+#     half-written tree -> ERR_MODULE_NOT_FOUND -> 500).
+#   - staging build: build into build.next (BUILD_OUT), leaving the live build/
+#     untouched for the ~50s build; swap it in with two fast renames right
+#     before the restart, so the old server never sees a partial build.
+#   A failed build does NOT touch build/ — the current build keeps serving.
+#     bin/deploy-ui          # build + restart
+#     bin/deploy-ui --auto   # same, quieter (used by the auto-deploy watcher)
+set -euo pipefail
+cd "$(dirname "$0")/.." || exit 1   # repo root, wherever this checkout lives
+NPM="$(command -v npm || echo npm)"
+REV=$(git rev-parse --short HEAD 2>/dev/null || echo '?')
+
+# Serialize: only one deploy (manual or watcher) builds at a time.
+exec 9>/tmp/workspace-ui-deploy.lock
+if ! flock -w 300 9; then
+  echo "[deploy-ui] another deploy is in progress — skipping $REV" >&2
+  exit 1
+fi
+
+echo "[deploy-ui] building $REV → build.next …"
+rm -rf build.next
+if ! BUILD_OUT=build.next "$NPM" run build; then
+  echo "[deploy-ui] BUILD FAILED for $REV — keeping the current running build" >&2
+  rm -rf build.next
+  exit 1
+fi
+
+# Atomic-ish swap: keep the previous build as build.prev for quick rollback.
+echo "[deploy-ui] swapping in the new build …"
+rm -rf build.prev
+[ -d build ] && mv build build.prev
+mv build.next build
+
+echo "[deploy-ui] restarting workspace-ui …"
+sudo systemctl restart workspace-ui
+# Stamp the commit that's now serving, so the watcher knows what's deployed
+# (and catches anything that landed while it wasn't running).
+git rev-parse HEAD > .deploy-rev
+echo "[deploy-ui] deployed $REV"

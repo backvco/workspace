@@ -1,0 +1,27 @@
+{
+  "_comment": "Plan verifier (server/plan-review.js). A read-only release engineer that must be able to read ANYTHING in the repos to validate a plan — so reads/search are wide open (Read/Glob/Grep + general Bash for find/grep/cat/etc.). It runs headless (claude -p) in a throwaway detached worktree of origin/<base>, so there is no interactive channel to approve permission prompts; we grant broad READ instead. Mutations stay denied: it must never edit, delete, commit, push, or escalate.",
+  "permissions": {
+    "defaultMode": "default",
+    "allow": [
+      "Read", "Glob", "Grep", "Bash"
+    ],
+    "deny": [
+      "Write",
+      "Edit",
+      "NotebookEdit",
+      "Bash(rm:*)",
+      "Bash(rmdir:*)",
+      "Bash(mv:*)",
+      "Bash(git push:*)",
+      "Bash(git commit:*)",
+      "Bash(git checkout:*)",
+      "Bash(git reset:*)",
+      "Bash(git clean:*)",
+      "Bash(git worktree:*)",
+      "Bash(sudo:*)",
+      "Bash(npm publish:*)",
+      "Bash(curl:*)",
+      "Bash(wget:*)"
+    ]
+  }
+}

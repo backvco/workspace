@@ -1,0 +1,470 @@
+// REST API: tab persistence, session listing/kill, and image paste -> inject.
+// Mounted under whatever base the host app chooses (default '/api').
+import express from 'express';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+import { loadTabs, saveTabs, normalize, removeTabFromState, appendTabToState, tabCountsAll } from './store.js';
+import { listSessions, hasSession, killSession, sendText, renameSession } from './tmux.js';
+import { sessionName } from './config.js';
+import {
+  readGlobal, addGlobal, removeGlobal,
+  readProject, writeProjectServer, removeProjectServer,
+  listProjects, buildDbServer, existingPassword, moveServer
+} from './mcp.js';
+import { list as fsList, read as fsRead, write as fsWrite } from './fs.js';
+import { getStats } from './stats.js';
+import {
+  listTargets, createTask, startTask, listAgents, stopAgent, removeTask, recordEvent,
+  approveAgent, replyAgent, acceptAgent, listEvents, setLinks, adviseTickets, enhanceTicketDraft,
+  planForProject, createMany, reorderTickets, openPlanPRForTask, openTicketChat, discussTicket, openPlanChat,
+  applyPlanLocal, revertPlanLocal, updateTask,
+  runPlan, pausePlan, resumePlan, renamePlan, archivePlan
+} from './agents.js';
+import { computeMetrics } from './agent-metrics.js';
+import { listTemplates, addTemplate, removeTemplate } from './agent-templates.js';
+import { preflightProject, scopedRepos, checkRepo } from './preflight.js';
+import { createPlanner, getPlanner, listPlanners, setProposed, stopPlanner, createFromPlanner, verifyPlanner, refineFromReview, setPlanName, enrichPlanner, buildAndValidate } from './planners.js';
+import { toolsCatalog, installTool, uninstallTool, scaffoldTool } from './tools.js';
+import { loadProjects, addProject, removeProject, availableFolders } from './projects.js';
+import {
+  listRepos, status as gitStatus, headVersion, branches as gitBranches,
+  checkout, createBranch, stage, stageAll, unstage, commit, push, createPR,
+  currentBranch, diffRefs, showAtRef
+} from './git.js';
+import { listRoots } from './projects.js';
+import {
+  authMiddleware, getAuthEnabled, setAuthEnabled, sessionUser,
+  countUsers, listUsers, createUser, deleteUser, findUser, verifyLogin,
+  signToken, verifyToken, setSessionCookie, clearSessionCookie, originAllowed
+} from './auth.js';
+import {
+  getLoginPolicy, setLoginPolicy, passkeyLoginAllowed, userHasPasskey, STEPUP_TTL_MS,
+  listCredentialsMeta, removeCredential, resetCredentials,
+  registerOptions, registerVerify, loginOptions, loginVerify
+} from './passkeys.js';
+
+const EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' };
+const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+export function buildRouter(cfg) {
+  const r = express.Router();
+  const wsId = (req) => cfg.resolveWorkspaceId(req);
+
+  // --- CSRF defense: reject cross-site state-changing requests up front. A
+  // forged browser POST from another site carries that site's Origin, which
+  // won't match; same-origin calls and non-browser clients (no Origin) pass. ---
+  r.use((req, res, next) => {
+    if (MUTATING.has(req.method) && !originAllowed(req, cfg)) return res.status(403).json({ error: 'cross-site request blocked' });
+    next();
+  });
+
+  // --- auth gate (no-op when auth is disabled) + auth/settings routes ---
+  r.use(authMiddleware(cfg));
+  const authj = express.json({ limit: '64kb' });
+
+  // Current auth state for the UI's login gate. Always reachable.
+  r.get('/auth/status', async (req, res) => {
+    let enabled = false;
+    try { enabled = await getAuthEnabled(cfg); } catch {}
+    const user = enabled ? sessionUser(cfg, req) : null;
+    let needsBootstrap = false;
+    try { needsBootstrap = (await countUsers(cfg)) === 0; } catch {}
+    let loginPolicy = 'password';
+    try { loginPolicy = await getLoginPolicy(cfg); } catch {}
+    res.json({ authEnabled: enabled, authed: !!user, user: user ? { id: user.uid, username: user.name } : null, needsBootstrap, hasSessionKey: !!cfg.sessionKey, loginPolicy, passkeysEnabled: passkeyLoginAllowed(loginPolicy) });
+  });
+
+  // Forward-auth endpoint for the reverse proxy: lets you gate OTHER same-origin
+  // services (e.g. an embedded code-server) with THIS app's session. It's behind
+  // the auth gate, so authMiddleware already returns 401 when not signed in; we
+  // only reach here (200) when authed - or when auth is off (then everything is
+  // open anyway). Caddy: forward_auth localhost:5301 { uri /api/auth/check }. Use
+  // r.all so the proxy's auth subrequest passes whatever the original method is.
+  r.all('/auth/check', (_req, res) => res.sendStatus(200));
+
+  // First-run signup: only allowed while no users exist yet.
+  r.post('/auth/signup', authj, async (req, res) => {
+    try {
+      if ((await countUsers(cfg)) > 0) return res.status(403).json({ error: 'signup is closed — ask an existing user to add you in Settings' });
+      const out = await createUser(cfg, req.body?.username, req.body?.password);
+      if (out.error) return res.status(400).json(out);
+      if (!cfg.sessionKey) return res.json({ ok: true, user: out, note: 'set WORKSPACE_SESSION_KEY to enable login sessions' });
+      setSessionCookie(req, res, signToken(cfg, { uid: out.id, name: out.username }));
+      res.json({ ok: true, user: out });
+    } catch (e) { (console.error('server error:', e?.message || e), res.status(500).json({ error: 'internal error' })); }
+  });
+
+  r.post('/auth/login', authj, async (req, res) => {
+    try {
+      const user = await findUser(cfg, req.body?.username);
+      // Always run the scrypt verify (verifyLogin uses a dummy hash when the user is
+      // unknown) so response time can't reveal whether a username exists.
+      const passOk = verifyLogin(req.body?.password, user);
+      if (!user || !passOk) return res.status(401).json({ error: 'invalid username or password' });
+      if (!cfg.sessionKey) return res.status(500).json({ error: 'server has no WORKSPACE_SESSION_KEY set' });
+      // Apply the login policy. A user with no enrolled passkey always keeps plain
+      // password access (so they can sign in and enroll) — this prevents lockout.
+      const policy = await getLoginPolicy(cfg);
+      const hasPk = await userHasPasskey(cfg, user.id);
+      if (hasPk && policy === 'passkey')
+        return res.status(401).json({ error: 'This account uses passkey sign-in. Use “Sign in with a passkey”.', code: 'use_passkey' });
+      if (hasPk && policy === 'both') {
+        // Password is the 1st factor — don't issue a session yet. Hand back a short
+        // signed step-up token the client must redeem with a passkey assertion.
+        const stepToken = signToken(cfg, { uid: user.id, name: user.username, stp: 'pk' }, STEPUP_TTL_MS);
+        return res.json({ ok: true, step: 'passkey', stepToken });
+      }
+      setSessionCookie(req, res, signToken(cfg, { uid: user.id, name: user.username }));
+      // Nudge: policy wants a passkey but this user hasn't enrolled one yet.
+      const mustEnroll = !hasPk && (policy === 'passkey' || policy === 'both');
+      res.json({ ok: true, user: { id: user.id, username: user.username }, mustEnroll });
+    } catch (e) { (console.error('server error:', e?.message || e), res.status(500).json({ error: 'internal error' })); }
+  });
+
+  r.post('/auth/logout', (req, res) => { clearSessionCookie(res); res.json({ ok: true }); });
+
+  // Settings (protected when auth on): user management + the auth toggle.
+  r.get('/auth/users', async (_req, res) => res.json({ users: await listUsers(cfg) }));
+  r.post('/auth/users', authj, async (req, res) => {
+    const out = await createUser(cfg, req.body?.username, req.body?.password);
+    res.status(out.error ? 400 : 200).json(out);
+  });
+  r.delete('/auth/users/:id', async (req, res) => {
+    if ((await countUsers(cfg)) <= 1) return res.status(400).json({ error: 'cannot delete the last user' });
+    res.json({ ok: await deleteUser(cfg, req.params.id) });
+  });
+  r.post('/auth/enabled', authj, async (req, res) => {
+    const out = await setAuthEnabled(cfg, !!req.body?.enabled);
+    res.status(out.error ? 400 : 200).json(out);
+  });
+
+  // --- passkeys (WebAuthn): Face ID / Touch ID / Windows Hello ---
+  // register-* are reachable only when signed in (authMiddleware guards them);
+  // login-* are PUBLIC (pre-session) — see the PUBLIC set in auth.js.
+  r.post('/auth/passkey/policy', authj, async (req, res) => {
+    const out = await setLoginPolicy(cfg, String(req.body?.policy || ''));
+    res.status(out.error ? 400 : 200).json(out);
+  });
+  // Admin: clear another user's passkeys (lost device). Behind the auth gate.
+  r.post('/auth/passkey/reset/:id', async (req, res) => {
+    const out = await resetCredentials(cfg, req.params.id);
+    res.status(out.error ? 400 : 200).json(out);
+  });
+  r.get('/auth/passkey/credentials', async (req, res) => {
+    const u = sessionUser(cfg, req);
+    if (!u) return res.status(401).json({ error: 'sign in first' });
+    res.json({ credentials: await listCredentialsMeta(cfg, u.uid) });
+  });
+  r.delete('/auth/passkey/credentials/:id', async (req, res) => {
+    const u = sessionUser(cfg, req);
+    if (!u) return res.status(401).json({ error: 'sign in first' });
+    res.json(await removeCredential(cfg, u.uid, req.params.id));
+  });
+  r.post('/auth/passkey/register-options', authj, async (req, res) => {
+    try {
+      const u = sessionUser(cfg, req);
+      if (!u) return res.status(401).json({ error: 'sign in first' });
+      const out = await registerOptions(cfg, req, u.uid);
+      res.status(out.error ? 400 : 200).json(out);
+    } catch (e) { (console.error('server error:', e?.message || e), res.status(500).json({ error: 'internal error' })); }
+  });
+  r.post('/auth/passkey/register-verify', authj, async (req, res) => {
+    try {
+      const u = sessionUser(cfg, req);
+      if (!u) return res.status(401).json({ error: 'sign in first' });
+      const out = await registerVerify(cfg, req, u.uid, req.body || {});
+      res.status(out.error ? 400 : 200).json(out);
+    } catch (e) { (console.error('server error:', e?.message || e), res.status(500).json({ error: 'internal error' })); }
+  });
+  r.post('/auth/passkey/login-options', authj, async (req, res) => {
+    try {
+      if (!cfg.sessionKey) return res.status(500).json({ error: 'server has no WORKSPACE_SESSION_KEY set' });
+      if (!passkeyLoginAllowed(await getLoginPolicy(cfg))) return res.status(403).json({ error: 'passkey sign-in is disabled' });
+      res.json(await loginOptions(cfg, req));
+    } catch (e) { (console.error('server error:', e?.message || e), res.status(500).json({ error: 'internal error' })); }
+  });
+  r.post('/auth/passkey/login-verify', authj, async (req, res) => {
+    try {
+      if (!cfg.sessionKey) return res.status(500).json({ error: 'server has no WORKSPACE_SESSION_KEY set' });
+      const policy = await getLoginPolicy(cfg);
+      if (!passkeyLoginAllowed(policy)) return res.status(403).json({ error: 'passkey sign-in is disabled' });
+      const out = await loginVerify(cfg, req, req.body || {});
+      if (out.error) return res.status(401).json(out);
+      // Under 2FA, a passkey alone is NOT enough — require the step-up token issued
+      // by the password step, and confirm it names the same user as the assertion.
+      if (policy === 'both') {
+        const tok = verifyToken(cfg, req.body?.stepToken);
+        if (!tok || tok.stp !== 'pk' || tok.uid !== out.user.id)
+          return res.status(401).json({ error: 'enter your password first' });
+      }
+      setSessionCookie(req, res, signToken(cfg, { uid: out.user.id, name: out.user.username }));
+      res.json({ ok: true, user: out.user });
+    } catch (e) { (console.error('server error:', e?.message || e), res.status(500).json({ error: 'internal error' })); }
+  });
+
+  // Read-only config the Settings tool surfaces (no secrets).
+  r.get('/config', (_req, res) => res.json({
+    projectRoots: cfg.projectRoots, termCwd: cfg.termCwd, dataDir: cfg.dataDir,
+    agentBin: cfg.claudeBin, hasSessionKey: !!cfg.sessionKey,
+    codeServerUrl: cfg.codeServerUrl
+  }));
+  r.get('/roots', (_req, res) => res.json({ roots: listRoots(cfg) }));
+
+  // --- projects: the registry the left rail manages; each scopes its own tabs ---
+  r.get('/projects', async (_req, res) => res.json({ projects: await loadProjects(cfg) }));
+  r.get('/projects/available', async (req, res) => res.json({ folders: await availableFolders(cfg, req.query.root) }));
+  r.post('/projects', express.json({ limit: '64kb' }), async (req, res) => res.json(await addProject(cfg, req.body || {})));
+  r.delete('/projects/:id', async (req, res) => res.json({ ok: await removeProject(cfg, req.params.id) }));
+
+  // --- tabs: the server-side source of truth for the UI's tab set ---
+  r.get('/tabs/counts', async (_req, res) => res.json(await tabCountsAll(cfg)));
+  r.get('/tabs', async (req, res) => res.json(await loadTabs(cfg, wsId(req))));
+  r.put('/tabs', express.json({ limit: '1mb' }), async (req, res) =>
+    res.json(await saveTabs(cfg, wsId(req), req.body)));
+
+  // Move a tab from the active project to another. Updates both projects' tab
+  // sets and renames the tmux session so a terminal's live shell follows.
+  r.post('/tabs/move', express.json({ limit: '64kb' }), async (req, res) => {
+    const from = wsId(req);
+    const { tabId, toProject } = req.body || {};
+    if (!tabId || !toProject) return res.status(400).json({ error: 'tabId and toProject required' });
+    if (toProject === from) return res.json({ ok: true });
+    const src = normalize(await loadTabs(cfg, from));
+    const tab = removeTabFromState(src, tabId);
+    if (!tab) return res.status(404).json({ error: 'tab not found' });
+    await saveTabs(cfg, from, src);
+    const dst = normalize(await loadTabs(cfg, toProject));
+    appendTabToState(dst, tab);
+    await saveTabs(cfg, toProject, dst);
+    await renameSession(sessionName(cfg, from, tabId), sessionName(cfg, toProject, tabId));
+    res.json({ ok: true });
+  });
+
+  // --- live tmux sessions for this workspace ---
+  r.get('/sessions', async (req, res) => {
+    const prefix = `${cfg.sessionPrefix}${wsId(req)}-`;
+    const all = await listSessions();
+    res.json({ sessions: all.filter((s) => s.startsWith(prefix)) });
+  });
+  r.post('/sessions/:tabKey/kill', async (req, res) => {
+    await killSession(sessionName(cfg, wsId(req), req.params.tabKey));
+    res.json({ ok: true });
+  });
+
+  // --- paste: store an image, optionally type its path into a terminal ---
+  r.post('/paste', express.raw({ type: () => true, limit: cfg.maxUploadBytes }),
+    async (req, res) => {
+      const ext = EXT[(req.headers['content-type'] || '').split(';')[0]] || 'png';
+      const dir = cfg.clipboardDir(wsId(req));
+      mkdirSync(dir, { recursive: true });
+      const file = path.join(dir, `paste-${Date.now()}.${ext}`);
+      try {
+        writeFileSync(file, req.body);
+      } catch (e) {
+        return (console.error('server error:', e?.message || e), res.status(500).json({ error: 'internal error' }));
+      }
+      let injected = false;
+      const tabKey = req.query.tab;
+      if (tabKey) {
+        const session = sessionName(cfg, wsId(req), String(tabKey));
+        if (await hasSession(session)) injected = await sendText(session, `${file} `);
+      }
+      res.json({ path: file, injected });
+    });
+
+  // --- MCP management: global (user scope) + per-project (.mcp.json) ---
+  r.get('/mcp/global', (_req, res) => res.json({ servers: readGlobal() }));
+  r.get('/mcp/projects', (_req, res) => res.json({ projects: listProjects(cfg) }));
+  r.get('/mcp/project', (req, res) => {
+    const p = String(req.query.path || '');
+    if (!p) return res.status(400).json({ error: 'path required' });
+    res.json({ path: p, servers: readProject(p) });
+  });
+  r.post('/mcp/add', express.json({ limit: '256kb' }), async (req, res) => {
+    const { scope, projectPath, name, kind, config } = req.body || {};
+    if (!name || !kind) return res.status(400).json({ error: 'name and kind required' });
+    // Editing in place: blank password means "keep the current one".
+    if (config && !config.password) {
+      const keep = existingPassword(cfg, scope, projectPath, name);
+      if (keep) config.password = keep;
+    }
+    const server = buildDbServer(kind, config || {});
+    if (!server.command && !server.url) return res.status(400).json({ error: 'incomplete server config' });
+    if (scope === 'global') {
+      const out = await addGlobal(cfg, name, server);
+      return out.ok ? res.json({ ok: true }) : res.status(500).json({ error: out.err || 'claude mcp add failed' });
+    }
+    if (!projectPath) return res.status(400).json({ error: 'projectPath required for project scope' });
+    try { writeProjectServer(projectPath, name, server); res.json({ ok: true, file: `${projectPath}/.mcp.json` }); }
+    catch (e) { (console.error('server error:', e?.message || e), res.status(500).json({ error: 'internal error' })); }
+  });
+  r.post('/mcp/move', express.json({ limit: '64kb' }), async (req, res) => {
+    const { name, from, to } = req.body || {};
+    if (!name || !from || !to) return res.status(400).json({ error: 'name, from, to required' });
+    const out = await moveServer(cfg, name, from, to);
+    return out.ok ? res.json({ ok: true }) : res.status(500).json({ error: out.error });
+  });
+  r.post('/mcp/remove', express.json({ limit: '64kb' }), async (req, res) => {
+    const { scope, projectPath, name } = req.body || {};
+    if (!name) return res.status(400).json({ error: 'name required' });
+    if (scope === 'global') {
+      const out = await removeGlobal(cfg, name);
+      return out.ok ? res.json({ ok: true }) : res.status(500).json({ error: out.err || 'remove failed' });
+    }
+    try { removeProjectServer(projectPath, name); res.json({ ok: true }); }
+    catch (e) { (console.error('server error:', e?.message || e), res.status(500).json({ error: 'internal error' })); }
+  });
+
+  // --- host stats for the header gauge ---
+  r.get('/stats', async (_req, res) => res.json(await getStats()));
+
+  // --- Files: filesystem browse/read/write (guarded to roots) ---
+  r.get('/fs/list', (req, res) => {
+    try { res.json(fsList(cfg, String(req.query.path || cfg.termCwd))); }
+    catch (e) { res.status(400).json({ error: e.message }); }
+  });
+  r.get('/fs/read', (req, res) => {
+    try { res.json({ path: String(req.query.path), content: fsRead(cfg, String(req.query.path)) }); }
+    catch (e) { res.status(400).json({ error: e.message }); }
+  });
+  r.post('/fs/write', express.json({ limit: '8mb' }), (req, res) => {
+    try { res.json({ ok: true, path: fsWrite(cfg, req.body.path, req.body.content) }); }
+    catch (e) { res.status(400).json({ error: e.message }); }
+  });
+
+  // --- Changes: git repos, working-tree status, and HEAD-vs-disk diff ---
+  r.get('/git/repos', (_req, res) => res.json({ repos: listRepos(cfg) }));
+  r.get('/git/status', async (req, res) => res.json({ changes: await gitStatus(String(req.query.repo || '')) }));
+  r.get('/git/diff', async (req, res) => {
+    const repo = String(req.query.repo || '');
+    const file = String(req.query.file || '');
+    let modified = '';
+    try { modified = fsRead(cfg, `${repo}/${file}`); } catch { modified = ''; } // deleted/binary -> empty
+    res.json({ original: await headVersion(repo, file), modified });
+  });
+
+  // Read-only branch browsing: compare the current branch against another ref
+  // (no checkout), and diff a single file across the two refs.
+  r.get('/git/compare', async (req, res) => {
+    const repo = String(req.query.repo || '');
+    const base = await currentBranch(repo);
+    res.json({ base, files: await diffRefs(repo, base, String(req.query.ref || '')) });
+  });
+  r.get('/git/refdiff', async (req, res) => {
+    const repo = String(req.query.repo || '');
+    const file = String(req.query.file || '');
+    res.json({
+      original: await showAtRef(repo, String(req.query.base || ''), file),
+      modified: await showAtRef(repo, String(req.query.ref || ''), file)
+    });
+  });
+
+  // git mutations (POST). Each returns { ok } or { error, detail } so the UI can show why.
+  const gj = express.json({ limit: '256kb' });
+  const done = (res, out) => (out.ok ? res.json({ ok: true, out: out.out }) : res.status(400).json({ error: out.err || 'git error' }));
+  r.get('/git/branches', async (req, res) => res.json(await gitBranches(String(req.query.repo || ''))));
+  r.post('/git/checkout', gj, async (req, res) => done(res, await checkout(req.body.repo, req.body.branch)));
+  r.post('/git/branch', gj, async (req, res) => done(res, await createBranch(req.body.repo, req.body.name, req.body.from)));
+  r.post('/git/stage', gj, async (req, res) =>
+    done(res, req.body.all ? await stageAll(req.body.repo) : await stage(req.body.repo, req.body.files || [])));
+  r.post('/git/unstage', gj, async (req, res) => done(res, await unstage(req.body.repo, req.body.files || [])));
+  r.post('/git/commit', gj, async (req, res) => {
+    if (!req.body.message) return res.status(400).json({ error: 'commit message required' });
+    done(res, await commit(req.body.repo, req.body.message));
+  });
+  r.post('/git/push', gj, async (req, res) => done(res, await push(req.body.repo, req.body.branch, req.body.setUpstream)));
+  r.post('/git/pr', gj, async (req, res) => {
+    const r2 = await createPR(req.body.repo, req.body.base || 'dev', req.body.title || '', req.body.body || '');
+    return r2.ok ? res.json({ ok: true, url: r2.url }) : res.status(400).json({ error: r2.err || 'gh pr create failed' });
+  });
+
+  // --- Agent Manager: tickets + Claude Code agents (each a tmux session in a worktree) ---
+  const aj = express.json({ limit: '256kb' });
+  r.get('/agents/targets', (_req, res) => res.json({ targets: listTargets(cfg) }));
+  r.get('/agents/metrics', async (_req, res) => res.json(await computeMetrics(cfg)));
+  // ticket templates
+  r.get('/agents/templates', async (_req, res) => res.json({ templates: await listTemplates(cfg) }));
+  r.post('/agents/templates', aj, async (req, res) => res.json(await addTemplate(cfg, req.body || {})));
+  r.delete('/agents/templates/:id', async (req, res) => res.json({ ok: await removeTemplate(cfg, req.params.id) }));
+  // Claude-assisted backlog help
+  r.post('/agents/advise', aj, async (req, res) => res.json(await adviseTickets(cfg, req.body?.project)));
+  r.post('/agents/enhance', aj, async (req, res) => res.json(await enhanceTicketDraft(cfg, req.body || {})));
+  // Plan an outcome into proposed tickets, then create them as a dependency-wired batch.
+  r.post('/agents/plan', aj, async (req, res) => res.json(await planForProject(cfg, req.body || {})));
+  r.post('/agents/plan-create', aj, async (req, res) => res.json(await createMany(cfg, req.body?.tickets)));
+  // Plan-with-Claude: a live chat session that emits proposed tickets via plan-emit.
+  // Baseline pre-flight: are the project's repos on a known-good start point
+  // (app repos synced to origin/dev, sdks on the latest npmjs version)? Run before
+  // starting a planner so the operator sees/clears WIP before planning.
+  r.post('/planners/preflight', aj, async (req, res) => res.json(await preflightProject(cfg, req.body?.project)));
+  // Streaming variant: emit the repo list up front, then one line per repo as its
+  // check (git fetch + ahead/behind, maybe an npm lookup) finishes, so the UI can
+  // show live per-repo progress instead of a frozen spinner.
+  r.post('/planners/preflight-stream', aj, async (req, res) => {
+    const { repos } = await scopedRepos(cfg, req.body?.project);
+    res.setHeader('content-type', 'application/x-ndjson');
+    res.setHeader('cache-control', 'no-cache');
+    res.setHeader('x-accel-buffering', 'no'); // tell nginx not to buffer the stream
+    const send = (o) => res.write(JSON.stringify(o) + '\n');
+    send({ type: 'start', repos: repos.map((p) => ({ path: p, name: p.split('/').pop() })) });
+    const results = [];
+    await Promise.all(repos.map(async (p) => { const r = await checkRepo(p); results.push(r); send({ type: 'result', result: r }); }));
+    send({ type: 'done', ok: !results.some((r) => r.status === 'block'), blocked: results.some((r) => r.status === 'block'), warned: results.some((r) => r.status === 'warn') });
+    res.end();
+  });
+  r.get('/planners', async (_req, res) => res.json({ planners: (await listPlanners(cfg)).map(enrichPlanner) }));
+  r.post('/planners', aj, async (req, res) => res.json(await createPlanner(cfg, req.body || {})));
+  r.get('/planners/:id', async (req, res) => res.json(enrichPlanner(await getPlanner(cfg, req.params.id)) || { error: 'not found' }));
+  r.post('/planners/:id/tickets', aj, async (req, res) => res.json({ ok: await setProposed(cfg, req.params.id, req.body?.tickets) }));
+  r.post('/planners/:id/verify', aj, async (req, res) => res.json(await verifyPlanner(cfg, req.params.id, req.body?.tickets)));
+  r.post('/planners/:id/plan', aj, async (req, res) => res.json(await setPlanName(cfg, req.params.id, req.body?.name)));
+  r.post('/planners/:id/refine', aj, async (req, res) => res.json(await refineFromReview(cfg, req.params.id, req.body?.findings)));
+  r.post('/planners/:id/create', aj, async (req, res) => res.json(await createFromPlanner(cfg, req.params.id, req.body?.tickets, req.body?.override)));
+  r.post('/planners/:id/build', aj, async (req, res) => {
+    const p = await getPlanner(cfg, req.params.id);
+    if (!p) return res.json({ error: 'not found' });
+    if (p.building) return res.json({ building: true, note: 'already running', buildStatus: p.buildStatus });
+    // Fire-and-forget: respond immediately, loop runs server-side
+    buildAndValidate(cfg, req.params.id).catch((e) => console.error('[plan-build]', e));
+    res.json({ building: true });
+  });
+  r.delete('/planners/:id', async (req, res) => res.json({ ok: await stopPlanner(cfg, req.params.id) }));
+  // Rename an plan across all its tickets (from the board).
+  r.post('/agents/plan/rename', aj, async (req, res) => res.json(await renamePlan(cfg, req.body?.from, req.body?.to)));
+  // Archive or unarchive an plan (hidden from board by default, still queryable).
+  r.post('/agents/plan/archive', aj, async (req, res) => res.json(await archivePlan(cfg, req.body?.planName, req.body?.archived !== false)));
+
+  // --- Tool builder: catalog of MCP tools, install into a project, scaffold new ---
+  r.get('/tools', async (_req, res) => res.json(await toolsCatalog(cfg)));
+  r.post('/tools/install', aj, async (req, res) => res.json(await installTool(cfg, req.body || {})));
+  r.post('/tools/uninstall', aj, async (req, res) => res.json(await uninstallTool(cfg, req.body || {})));
+  r.post('/tools/scaffold', aj, async (req, res) => res.json(await scaffoldTool(cfg, req.body || {})));
+  r.get('/agents', async (_req, res) => res.json({ tasks: await listAgents(cfg) }));
+  r.post('/agents', aj, async (req, res) => res.json(await createTask(cfg, req.body || {})));
+  r.post('/agents/:id/start', async (req, res) => res.json(await startTask(cfg, req.params.id)));
+  r.get('/agents/:id/events', async (req, res) => res.json({ events: await listEvents(cfg, req.params.id) }));
+  r.post('/agents/:id/links', aj, async (req, res) => res.json({ ok: await setLinks(cfg, req.params.id, req.body || {}) }));
+  r.post('/agents/reorder', aj, async (req, res) => res.json({ ok: await reorderTickets(cfg, req.body?.ids) }));
+  r.post('/agents/:id/stop', async (req, res) => { await stopAgent(cfg, req.params.id); res.json({ ok: true }); });
+  r.delete('/agents/:id', async (req, res) => res.json({ ok: await removeTask(cfg, req.params.id) }));
+  // operator gate actions (board -> agent)
+  r.post('/agents/:id/approve', async (req, res) => res.json({ ok: await approveAgent(cfg, req.params.id) }));
+  r.post('/agents/:id/reply', express.json({ limit: '64kb' }), async (req, res) =>
+    res.json({ ok: await replyAgent(cfg, req.params.id, req.body.text) }));
+  r.post('/agents/:id/accept', async (req, res) => res.json(await acceptAgent(cfg, req.params.id)));
+  r.post('/agents/:id/plan-pr', async (req, res) => res.json(await openPlanPRForTask(cfg, req.params.id)));
+  r.post('/agents/:id/plan-run', async (req, res) => res.json(await runPlan(cfg, req.params.id)));
+  r.post('/agents/:id/plan-pause', async (req, res) => res.json(await pausePlan(cfg, req.params.id)));
+  r.post('/agents/:id/plan-resume', async (req, res) => res.json(await resumePlan(cfg, req.params.id)));
+  r.post('/agents/:id/chat', async (req, res) => res.json(await openTicketChat(cfg, req.params.id)));
+  r.post('/agents/:id/discuss', async (req, res) => res.json(await discussTicket(cfg, req.params.id)));
+  r.post('/agents/:id/plan-chat', async (req, res) => res.json(await openPlanChat(cfg, req.params.id)));
+  r.post('/agents/:id/apply-local', async (req, res) => res.json(await applyPlanLocal(cfg, req.params.id)));
+  r.post('/agents/:id/revert-local', async (req, res) => res.json(await revertPlanLocal(cfg, req.params.id)));
+  r.post('/agents/:id/update', aj, async (req, res) => res.json(await updateTask(cfg, req.params.id, req.body || {})));
+  // posted by Claude Code hooks running inside an agent (AGENT_TASK_ID set)
+  r.post('/agents/:id/event', express.json({ limit: '64kb' }), async (req, res) =>
+    res.json({ ok: await recordEvent(cfg, req.params.id, req.body.event, req.body.message) }));
+
+  return r;
+}

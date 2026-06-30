@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# agent-report <plan|ask|done|progress> <text...>
+# The channel a managed agent uses to drive its task's state on the board.
+# No-op outside a managed agent (AGENT_TASK_ID unset). Reads remaining args as
+# the message; also accepts the message on stdin if no args are given.
+[ -z "$AGENT_TASK_ID" ] && exit 0
+kind="$1"; shift
+text="$*"
+[ -z "$text" ] && text="$(cat 2>/dev/null)"
+port="${WORKSPACE_PORT:-5301}"
+body=$(printf '%s' "$text" | python3 -c 'import json,sys; print(json.dumps({"event":sys.argv[1],"message":sys.stdin.read()}))' "$kind" 2>/dev/null)
+[ -z "$body" ] && body="{\"event\":\"$kind\",\"message\":\"\"}"
+curl -s --max-time 5 -X POST "http://127.0.0.1:${port}/api/agents/${AGENT_TASK_ID}/event" \
+  -H 'content-type: application/json' \
+  ${WORKSPACE_API_TOKEN:+-H "x-workspace-token: ${WORKSPACE_API_TOKEN}"} \
+  -d "$body" >/dev/null 2>&1
+exit 0
