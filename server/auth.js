@@ -123,7 +123,7 @@ export async function findUser(cfg, username) {
 export async function createUser(cfg, username, password) {
   username = String(username || '').trim();
   if (!username || !password) return { error: 'username and password required' };
-  if (String(password).length < 6) return { error: 'password must be at least 6 characters' };
+  if (String(password).length < 8) return { error: 'password must be at least 8 characters' };
   if (await findUser(cfg, username)) return { error: 'username already exists' };
   const user = { id: crypto.randomUUID(), username, passwordHash: hashPassword(password), createdAt: Date.now() };
   await q(cfg, 'INSERT INTO users (id, data) VALUES ($1, $2::jsonb)', [user.id, JSON.stringify(user)]);
@@ -146,7 +146,7 @@ export async function updateUser(cfg, id, { name, email } = {}) {
 // Admin set-password: replaces a user's password without the old one (any signed-in
 // user can manage accounts in this app — same model as add/remove user).
 export async function setUserPassword(cfg, id, password) {
-  if (!password || String(password).length < 6) return { error: 'password must be at least 6 characters' };
+  if (!password || String(password).length < 8) return { error: 'password must be at least 8 characters' };
   const rows = await q(cfg, 'SELECT data FROM users WHERE id = $1', [String(id)]);
   const user = rows[0]?.data;
   if (!user) return { error: 'user not found' };

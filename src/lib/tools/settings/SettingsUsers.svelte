@@ -14,14 +14,14 @@
 
   // Detail form fields (seeded when the selection changes).
   let nameInput = $state(''); let emailInput = $state(''); let newPass = $state(''); let newPass2 = $state('');
-  let setPwOk = $derived(newPass.length >= 6 && newPass === newPass2);
+  let setPwOk = $derived(newPass.length >= 8 && newPass === newPass2);
   /** @type {{id:string,name:string,addedAt:number}[]} */
   let creds = $state([]);
   let lastSeeded = '';
 
   // New-user form.
   let newUser = $state(''); let newUserPass = $state(''); let newUserPass2 = $state('');
-  let addOk = $derived(!!newUser.trim() && newUserPass.length >= 6 && newUserPass === newUserPass2);
+  let addOk = $derived(!!newUser.trim() && newUserPass.length >= 8 && newUserPass === newUserPass2);
 
   // Auto-select the signed-in user (or the first) once users load.
   $effect(() => {
@@ -75,19 +75,32 @@
   }
 
   // --- passkeys for the selected user ---
+  // Enrollment-code entry (shown when adding a NEW device is blocked from a
+  // password session). Display as ABC-123-XYZ; the server normalises on redeem.
+  let showCode = $state(''); let codeInput = $state('');
+  let codeOk = $derived(codeInput.replace(/[^A-Za-z0-9]/g, '').length === 9);
+  function formatCode(/** @type {string} */ raw) {
+    const c = raw.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 9);
+    return c.match(/.{1,3}/g)?.join('-') ?? c;
+  }
+
   async function addOwnDevice() {
     const name = (prompt('Name this passkey (e.g. which device it is):', deviceLabel()) || '').trim();
     if (!name) return;
     s.busy = true;
-    let r = await enrollPasskey(name);
-    if (r.code === 'enroll_blocked') {
-      const code = (prompt('To add another device, enter a one-time enrollment code from an admin:') || '').trim();
-      if (!code) { s.busy = false; return; }
-      r = await enrollPasskey(name, code);
-    }
+    const r = await enrollPasskey(name);
     s.busy = false;
+    if (r.code === 'enroll_blocked') { showCode = name; codeInput = ''; return; }
     if (r.error) return flash(r.error, true);
     flash('Passkey added.'); reload(); refreshCreds();
+  }
+  async function submitCode() {
+    if (!codeOk) return;
+    s.busy = true;
+    const r = await enrollPasskey(showCode, codeInput);
+    s.busy = false;
+    if (r.error) return flash(r.error, true);
+    showCode = ''; flash('Passkey added.'); reload(); refreshCreds();
   }
   async function removeCred(/** @type {string} */ credId) {
     if (!selected || !confirm('Remove this passkey?')) return;
@@ -159,7 +172,7 @@
       <div class="mt-4 border-t border-line pt-3">
         <div class="text-xs text-muted mb-1">Set password</div>
         <div class="space-y-2 max-w-xs">
-          <PasswordInput bind:value={newPass} placeholder="new password (min 6)" />
+          <PasswordInput bind:value={newPass} placeholder="new password (min 8)" />
           <PasswordInput bind:value={newPass2} placeholder="confirm password" />
           {#if newPass2 && newPass !== newPass2}<div class="text-[11px] text-red-500">Passwords don't match.</div>{/if}
           <button class="text-xs bg-green-700 hover:bg-green-600 text-white rounded px-3 py-1.5 disabled:opacity-40"
@@ -203,13 +216,29 @@
   <Modal title="New user" onClose={() => (showAdd = false)} max="max-w-sm">
     <form class="space-y-2" onsubmit={(e) => { e.preventDefault(); addUser(); }}>
       <input class="w-full bg-elevated border border-line rounded px-2 py-1.5 text-sm" placeholder="username" bind:value={newUser} autocomplete="off" />
-      <PasswordInput bind:value={newUserPass} placeholder="password (min 6)" />
+      <PasswordInput bind:value={newUserPass} placeholder="password (min 8)" />
       <PasswordInput bind:value={newUserPass2} placeholder="confirm password" />
       {#if newUserPass2 && newUserPass !== newUserPass2}<div class="text-[11px] text-red-500">Passwords don't match.</div>{/if}
       <div class="flex justify-end gap-2 pt-1">
         <button type="button" class="text-xs border border-line rounded px-3 py-1.5 text-muted hover:text-content" onclick={() => (showAdd = false)}>Cancel</button>
         <button type="submit" class="text-xs bg-green-700 hover:bg-green-600 text-white rounded px-3 py-1.5 disabled:opacity-40"
           disabled={s.busy || !addOk}>Add user</button>
+      </div>
+    </form>
+  </Modal>
+{/if}
+
+{#if showCode}
+  <Modal title="Enter enrollment code" onClose={() => (showCode = '')} max="max-w-sm">
+    <form onsubmit={(e) => { e.preventDefault(); submitCode(); }}>
+      <div class="text-xs text-muted mb-3">Enter the one-time code from an admin to add this device.</div>
+      <input class="w-full bg-elevated border border-line rounded px-3 py-2 text-center text-lg font-mono tracking-[0.3em] uppercase"
+        placeholder="ABC-123-XYZ" maxlength="11" autocomplete="off" spellcheck="false"
+        value={codeInput} oninput={(e) => (codeInput = formatCode(/** @type {HTMLInputElement} */ (e.currentTarget).value))} />
+      <div class="flex justify-end gap-2 pt-3">
+        <button type="button" class="text-xs border border-line rounded px-3 py-1.5 text-muted hover:text-content" onclick={() => (showCode = '')}>Cancel</button>
+        <button type="submit" class="text-xs bg-green-700 hover:bg-green-600 text-white rounded px-3 py-1.5 disabled:opacity-40"
+          disabled={s.busy || !codeOk}>Add device</button>
       </div>
     </form>
   </Modal>

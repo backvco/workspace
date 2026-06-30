@@ -54,23 +54,32 @@ export const passkeyAuthed = (amr) => typeof amr === 'string' && amr.split('+').
 
 // --- admin one-time enrollment codes (lost-all-devices fallback) ---
 const ENROLL_CODE_TTL_MS = 15 * 60 * 1000;
+// Unambiguous alphabet (no 0/O, 1/I/L) so a relayed code is easy to read aloud.
+const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+// Canonical form for hashing: uppercase, strip dashes/spaces/anything non-alnum, so
+// the user can type it with or without the display dashes.
+const canonCode = (code) => String(code).toUpperCase().replace(/[^A-Z0-9]/g, '');
+// Display form: ABC-123-XYZ (groups of 3).
+const fmtCode = (c) => c.replace(/(.{3})(.{3})(.{3})/, '$1-$2-$3');
 function hashCode(cfg, code) {
-  return crypto.createHmac('sha256', cfg.sessionKey || 'x').update(String(code)).digest('hex');
+  return crypto.createHmac('sha256', cfg.sessionKey || 'x').update(canonCode(code)).digest('hex');
 }
 // Generate (and store the hash of) a one-time code for a user; returns the plaintext
-// once. A fresh code overwrites any previous unused one for that user.
+// once, formatted as ABC-123-XYZ. A fresh code overwrites any previous unused one.
 export async function createEnrollCode(cfg, userId) {
   const u = await getUserById(cfg, userId);
   if (!u) return { error: 'user not found' };
-  const code = crypto.randomBytes(5).toString('hex').toUpperCase(); // 10 hex chars
+  const bytes = crypto.randomBytes(9);
+  let code = '';
+  for (let i = 0; i < 9; i++) code += CODE_ALPHABET[bytes[i] % CODE_ALPHABET.length];
   await q(cfg, `INSERT INTO enroll_codes (user_id, code_hash, created_at) VALUES ($1,$2, now())
                 ON CONFLICT (user_id) DO UPDATE SET code_hash = $2, created_at = now()`,
     [userId, hashCode(cfg, code)]);
-  return { code, expiresInMin: ENROLL_CODE_TTL_MS / 60000 };
+  return { code: fmtCode(code), expiresInMin: ENROLL_CODE_TTL_MS / 60000 };
 }
 // Atomically consume a user's code: true only if it matches and is unexpired.
 export async function redeemEnrollCode(cfg, userId, code) {
-  if (!code) return false;
+  if (!canonCode(code)) return false;
   const rows = await q(cfg, 'DELETE FROM enroll_codes WHERE user_id = $1 RETURNING code_hash, created_at', [userId]);
   const row = rows[0];
   if (!row) return false;
