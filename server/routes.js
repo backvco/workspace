@@ -57,7 +57,14 @@ export function buildRouter(cfg) {
   // forged browser POST from another site carries that site's Origin, which
   // won't match; same-origin calls and non-browser clients (no Origin) pass. ---
   r.use((req, res, next) => {
-    if (MUTATING.has(req.method) && !originAllowed(req, cfg)) return res.status(403).json({ error: 'cross-site request blocked' });
+    if (MUTATING.has(req.method) && !originAllowed(req, cfg)) {
+      const rejectedOrigin = req.get('origin') || 'unknown';
+      return res.status(403).json({
+        error: 'cross-site request blocked: origin not allowed',
+        origin: rejectedOrigin,
+        hint: 'Check allowed origin/CORS and reverse-proxy Origin forwarding configuration.'
+      });
+    }
     next();
   });
 
