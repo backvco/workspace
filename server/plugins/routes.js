@@ -79,7 +79,9 @@ export function buildPluginRouter(cfg) {
     const qs = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
     const target = `${plugin.url}/${rest}${qs}`;
     try {
-      const init = { method: req.method, headers: { 'x-forwarded-host': req.get('host') || '' } };
+      // Hard timeout: a wedged plugin degrades to a fast 502 instead of piling up
+      // hung proxy connections in this process while the browser keeps polling.
+      const init = { method: req.method, headers: { 'x-forwarded-host': req.get('host') || '' }, signal: AbortSignal.timeout(30000) };
       if (!['GET', 'HEAD'].includes(req.method)) {
         init.headers['content-type'] = req.get('content-type') || 'application/json';
         init.body = req.is('application/json') ? JSON.stringify(req.body ?? {}) : undefined;
