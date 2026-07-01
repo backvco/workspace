@@ -56,6 +56,19 @@ export function buildPluginRouter(cfg) {
     try { res.json(await host.gitBranches(String(req.query.repo || ''))); } catch (e) { res.status(500).json({ error: String(e?.message || e) }); }
   });
 
+  // --- driven tmux sessions (guarded + namespaced in host-api.js) ---
+  const S = host.session;
+  const w = (req) => String(req.query.wsId || req.body?.wsId || 'default');
+  const k = (req) => String(req.query.key || req.body?.key || '');
+  const wrap = (fn) => async (req, res) => { try { res.json(await fn(req)); } catch (e) { res.status(400).json({ error: String(e?.message || e) }); } };
+  r.post('/host/session/ensure', internalOnly, wrap((req) => S.ensure(w(req), k(req), req.body || {})));
+  r.get('/host/session/exists', internalOnly, wrap(async (req) => ({ exists: await S.exists(w(req), k(req)) })));
+  r.post('/host/session/send', internalOnly, wrap(async (req) => ({ ok: await S.send(w(req), k(req), String(req.body?.text ?? '')) })));
+  r.post('/host/session/keys', internalOnly, wrap(async (req) => ({ ok: await S.keys(w(req), k(req), String(req.body?.keys ?? 'Enter')) })));
+  r.get('/host/session/capture', internalOnly, wrap(async (req) => ({ text: await S.capture(w(req), k(req), Number(req.query.lines) || 400) })));
+  r.post('/host/session/kill', internalOnly, wrap(async (req) => ({ ok: await S.kill(w(req), k(req)) })));
+  r.get('/host/session/list', internalOnly, wrap(async (req) => ({ sessions: await S.list(w(req)) })));
+
   // Reverse-proxy to a plugin's own service. The iframe + the plugin UI's API
   // calls go through here, so they inherit the workspace login (the plugin never
   // needs to be exposed publicly). Non-streaming; websockets are a follow-up.

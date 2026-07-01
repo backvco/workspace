@@ -70,6 +70,30 @@ export async function sendText(session, text) {
   return (await run(['send-keys', '-t', session, '-l', text])).ok;
 }
 
+// Create a detached session in a cwd, optionally running a command with extra env.
+// Used by the plugin host-API to spawn a driven Claude Code session. No-op if it
+// already exists (caller checks hasSession first for idempotency).
+export async function newSession(session, { cwd, command, env } = {}) {
+  const args = ['new-session', '-d', '-s', session];
+  if (cwd) args.push('-c', cwd);
+  for (const [k, v] of Object.entries(env || {})) args.push('-e', `${k}=${v}`);
+  if (command) args.push(command);
+  return (await run(args)).ok;
+}
+
+// Read the last `lines` of a session's pane (for a polled, read-only view of a
+// driven session in the plugin UI). Returns '' if the session is gone.
+export async function capturePane(session, lines = 400) {
+  const { ok, out } = await run(['capture-pane', '-p', '-t', session, '-S', `-${lines}`]);
+  return ok ? out : '';
+}
+
+// Send interpreted keys (e.g. 'Enter', 'Escape') — distinct from sendText's literal
+// mode. Used to submit a prompt after typing it, or to interrupt.
+export async function sendKeys(session, keys) {
+  return (await run(['send-keys', '-t', session, keys])).ok;
+}
+
 // Scroll the session's tmux scrollback buffer from a touch swipe.
 // lines > 0 = scroll up (see older content), lines < 0 = scroll down.
 // Enters copy-mode with -e so tmux auto-exits when scrolled back to the bottom.
