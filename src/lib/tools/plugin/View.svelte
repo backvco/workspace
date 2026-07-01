@@ -5,13 +5,18 @@
   // (compiled, private) provides the actual UI. Empty state when none configured.
   import { onMount } from 'svelte';
   import { api } from '$lib/api.js';
+  import { projectStore } from '$lib/projects.svelte.js';
 
   let plugins = $state(/** @type {{name:string,label:string}[]} */ ([]));
   let active = $state(/** @type {string} */ (''));
   let loading = $state(true);
   let authRequired = $state(false);
 
-  const src = $derived(active ? api.pluginProxyUrl(active) : '');
+  const src = $derived(
+    active
+      ? `${api.pluginProxyUrl(active)}?ws=${encodeURIComponent(projectStore.activeId)}`
+      : ''
+  );
 
   onMount(async () => {
     try {
