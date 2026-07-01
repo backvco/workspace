@@ -9,6 +9,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { loadEnv } from './env.js';
+import { parsePlugins } from './plugins/registry.js';
 
 loadEnv(); // populate process.env from `.env` before we read it (real env still wins)
 
@@ -60,6 +61,12 @@ export const defaultConfig = {
   // Per-process secret the server hands to the local agent CLIs it spawns so
   // their loopback API calls bypass auth (they have no user cookie).
   internalToken: process.env.WORKSPACE_API_TOKEN || crypto.randomBytes(24).toString('hex'),
+
+  // Optional embedded plugins (external services embedded as tools + proxied).
+  // Runtime config: WORKSPACE_PLUGINS='name|Label|http://host:port, ...'. Absent =>
+  // the app behaves exactly as open-source, with no plugin surface. See
+  // server/plugins/registry.js.
+  plugins: parsePlugins(process.env.WORKSPACE_PLUGINS || ''),
 
   appRoot: APP_ROOT,
   // App bin dir (holds `agent-report`, the agent->board reporting tool). Prepended

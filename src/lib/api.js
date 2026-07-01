@@ -102,6 +102,11 @@ export const api = {
   passkeyLoginVerify: (body) => jsonSafe('/api/auth/passkey/login-verify', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
 
   serverConfig: () => json('/api/config'),
+
+  // --- plugins (optional embedded external tools; empty on OSS-only installs) ---
+  plugins: () => json('/api/plugins'),
+  /** Same-origin base a plugin's embedded surface is proxied under. @param {string} name */
+  pluginProxyUrl: (name) => apiUrl(`/api/plugins/${encodeURIComponent(name)}/proxy/`),
   roots: () => json('/api/roots'),
 
   // --- projects ---

@@ -1,6 +1,7 @@
 // REST API: tab persistence, session listing/kill, and image paste -> inject.
 // Mounted under whatever base the host app chooses (default '/api').
 import express from 'express';
+import { buildPluginRouter } from './plugins/routes.js';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { loadTabs, saveTabs, normalize, removeTabFromState, appendTabToState, tabCountsAll } from './store.js';
@@ -69,6 +70,11 @@ export function buildRouter(cfg) {
 
   // --- auth gate (no-op when auth is disabled) + auth/settings routes ---
   r.use(authMiddleware(cfg));
+
+  // --- plugin seam (optional paid/closed plugins embedded as tools + proxied) ---
+  // Auth-gated by the middleware above; host-api sub-routes add an internal-token
+  // check. No-op surface when no plugins are configured.
+  r.use('/plugins', buildPluginRouter(cfg));
   const authj = express.json({ limit: '64kb' });
   // Rate limits on credential-handling endpoints (brute-force defense). Login &
   // passkey assertion are the unauthenticated brute targets; the admin actions are

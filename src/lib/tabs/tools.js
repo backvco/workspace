@@ -8,3 +8,4 @@ import '$lib/tools/agents/register.js';
 import '$lib/tools/planner/register.js';
 import '$lib/tools/toolbuilder/register.js';
 import '$lib/tools/settings/register.js';
+import '$lib/tools/plugin/register.js';
