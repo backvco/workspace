@@ -11,16 +11,31 @@
 import express from 'express';
 import { listPlugins, getPlugin } from './registry.js';
 import { buildHostApi } from './host-api.js';
+import { getAuthEnabled } from '../auth.js';
 
 export function buildPluginRouter(cfg) {
   const r = express.Router();
   const host = buildHostApi(cfg);
   r.use(express.json({ limit: '256kb' }));
 
-  // Discovery — what the UI needs to know to embed plugin tools.
-  r.get('/', (req, res) => {
-    res.json(listPlugins(cfg).map((p) => ({ name: p.name, label: p.label })));
+  // SECURITY (doc 23): a plugin can drive shell/Claude sessions, so it is NEVER
+  // exposed unless workspace auth is enabled. Discovery reports the requirement;
+  // the proxy + host-API are hard-blocked when auth is off.
+  const authRequired = async () => !(await getAuthEnabled(cfg));
+
+  // Discovery — plugins + whether auth must be turned on first.
+  r.get('/', async (req, res) => {
+    const gated = await authRequired();
+    res.json({ authRequired: gated, plugins: gated ? [] : listPlugins(cfg).map((p) => ({ name: p.name, label: p.label })) });
   });
+
+  // Hard auth gate for everything that can reach a plugin's power.
+  const requireAuth = async (req, res, next) => {
+    if (await authRequired()) return res.status(403).json({ error: 'workspace auth must be enabled to use plugins', code: 'auth_required' });
+    next();
+  };
+  r.use('/host', requireAuth);
+  r.use('/:name/proxy', requireAuth);
 
   // Host API — a plugin calls these with the per-process internal token.
   const internalOnly = (req, res, next) => {

@@ -9,11 +9,17 @@
   let plugins = $state(/** @type {{name:string,label:string}[]} */ ([]));
   let active = $state(/** @type {string} */ (''));
   let loading = $state(true);
+  let authRequired = $state(false);
 
   const src = $derived(active ? api.pluginProxyUrl(active) : '');
 
   onMount(async () => {
-    try { plugins = await api.plugins(); active = plugins[0]?.name || ''; } catch {}
+    try {
+      const d = await api.plugins();
+      authRequired = !!d.authRequired;
+      plugins = d.plugins || [];
+      active = plugins[0]?.name || '';
+    } catch {}
     loading = false;
   });
 </script>
@@ -42,6 +48,9 @@
     <div>
       {#if loading}
         <p>Loading plugins…</p>
+      {:else if authRequired}
+        <p>Workspace login is required to use plugins.</p>
+        <p class="mt-1">A plugin can drive terminal/agent sessions, so it stays disabled until you <b>enable login</b> in <code class="mx-1">Settings</code>.</p>
       {:else}
         <p>No plugin configured.</p>
         <p class="mt-1">Set <code class="mx-1">WORKSPACE_PLUGINS</code> in <code>.env</code> (e.g. <code>agentmgr|Agent Manager|http://127.0.0.1:5330</code>) and restart the API to embed a plugin here.</p>
